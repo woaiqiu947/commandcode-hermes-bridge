@@ -1,0 +1,51 @@
+diff --git a/src/config.ts b/src/config.ts
+index 9fdec8f..80e0970 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -143,6 +143,10 @@ export function loadBridgeConfig(options: LoadBridgeConfigOptions = {}): BridgeC
+           allowedFromEnv.map((model) => ({ id: model, enabled: true })),
+           allowedFromEnv,
+           normalizeModelName,
++          // 本地定制（2026-09-02）：env 白名单是唯一权威，不再并入内置定义的默认
++          // enabled 模型——否则 COMMANDCODE_ALLOWED_MODELS 只能增不能减，收紧
++          // 白名单（如只留 GOAT 套餐模型）时被删的模型仍会出现在 /v1/models 里。
++          false,
+         )
+       : defaultModelCatalog();
+   const enabledModels = configuredModelCatalog
+@@ -200,6 +204,7 @@ export function loadBridgeConfig(options: LoadBridgeConfigOptions = {}): BridgeC
+     defaultModel,
+     allowedModels,
+     allowUnknownModels: parseBoolean(env.COMMANDCODE_ALLOW_UNKNOWN_MODELS, false),
++    publicModelsCanonicalOnly: parseBoolean(env.COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY, false),
+     bridgeApiKey:
+       stringValue(dashboardConfig.bridgeApiKey) || env.BRIDGE_API_KEY?.trim() || undefined,
+     bridgeApiKeySource: stringValue(dashboardConfig.bridgeApiKey)
+@@ -278,6 +283,14 @@ export function resolveModel(model: string | undefined, config: BridgeConfig): R
+ 
+ export function publicModelList(config: BridgeConfig): string[] {
+   const canonicalModels = uniq([config.defaultModel, ...config.allowedModels]);
++  if (config.publicModelsCanonicalOnly) {
++    // 本地定制（2026-09-02，开关 COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY=true）：
++    // /v1/models 只列正式模型 ID，不附带 MODEL_ALIASES 别名与 "default"/"commandcode/default"
++    // 占位——否则同一模型会出现多条同义写法（如 gpt-5.6-luna / openai/gpt-5.6-luna /
++    // GPT-5.6-Luna），让 Hermes 客户端的模型列表出现大量重复行。
++    // 请求侧的别名解析（normalizeModelName -> MODEL_ALIASES）不受影响，仍可按别名调用。
++    return canonicalModels;
++  }
+   const aliasModels = Object.entries(MODEL_ALIASES)
+     .filter(
+       ([alias, upstream]) =>
+diff --git a/src/types.ts b/src/types.ts
+index c43c801..0913c58 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -268,6 +268,8 @@ export interface BridgeConfig {
+   defaultModel: string;
+   allowedModels: string[];
+   allowUnknownModels: boolean;
++  /** 本地定制（2026-09-02）：/v1/models 是否只列正式模型 ID（跳过 MODEL_ALIASES 别名与 default 占位）；可选以兼容外部构造的配置 */
++  publicModelsCanonicalOnly?: boolean;
+   bridgeApiKey: string | undefined;
+   bridgeApiKeySource: "dashboard_config" | "env" | "none";
+   commandCodeApiKey: string | undefined;
