@@ -91,7 +91,7 @@ hermes config set providers.commandcode.name commandcode
 hermes config set providers.commandcode.api "http://127.0.0.1:9992/v1"
 hermes config set providers.commandcode.key_env COMMANDCODE_BRIDGE_API_KEY
 hermes config set providers.commandcode.transport openai_chat
-hermes config set providers.commandcode.default_model "gpt-5.6-luna"
+hermes config set providers.commandcode.default_model "deepseek/deepseek-v4-flash"
 hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
 ```
 
@@ -106,7 +106,7 @@ echo "COMMANDCODE_BRIDGE_API_KEY=<你的BRIDGE_API_KEY>" >> "$HERMES_ENV"   # Wi
 
 ```bash
 hermes config set model.provider custom:commandcode
-hermes config set model.default gpt-5.6-luna
+hermes config set model.default deepseek/deepseek-v4-flash
 ```
 
 ## 5. 冒烟测试

@@ -20,4 +20,4 @@
 
 - 2026-09-02：本机跑通。两处本地补丁（去别名 + 白名单唯一权威）已导出到仓库 `patches/0001-canonical-models-only.patch`，上游 `git pull` 后需重打。
 - 2026-09-08：资产整理进仓库，本目录创建。
-- 2026-09-08（第二台 mac 装机后对齐）：① 补丁改为 `git apply patches/0001-canonical-models-only.patch` 一键重打（patch 内字段为可选 `?: boolean`，测试零改动）；② Hermes 端不再维护静态 models 列表，改 `discover_models: true`（bridge `/v1/models` 唯一权威，手册 §5.1）；③ 本机实测 `gpt-5.6-luna` 报 region not available（`gpt-5.6-sol` 正常），provider `default_model` 定为 `gpt-5.6-sol`；④ plist 用本目录模板（含 PATH + ProcessType）。
+- 2026-09-08（第二台 mac 装机后对齐）：① 补丁改为 `git apply patches/0001-canonical-models-only.patch` 一键重打（patch 内字段为可选 `?: boolean`，测试零改动）；② Hermes 端不再维护静态 models 列表，改 `discover_models: true`（bridge `/v1/models` 唯一权威，手册 §5.1）；③ 本机实测 `gpt-5.6-luna` 报 region not available（`gpt-5.6-sol` 正常），provider `default_model` 定为 `deepseek/deepseek-v4-flash`；④ plist 用本目录模板（含 PATH + ProcessType）。
