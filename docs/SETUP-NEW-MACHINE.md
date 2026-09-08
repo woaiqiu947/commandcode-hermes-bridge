@@ -148,6 +148,13 @@ hermes config unset providers.commandcode.models
 hermes config set providers.commandcode.discover_models true
 ```
 
+> 版本注记（2026-09-08，Hermes v0.18.2 实测）：`hermes config unset` / `hermes
+> config get` 在该版本**不存在**（`config_command` 只处理 show/edit/set/path/
+> env-path/migrate，未知子命令静默 no-op，不会报错）。等效做法：直接编辑
+> `$(hermes config path)` 删掉 `providers.commandcode` 下的整段 `models:` 块
+> （逐行替换，勿用 PyYAML 整文件往返以免丢注释），再执行上面的
+> `discover_models` 设置。`discover_models` 字段本身 v0.18.2 已支持。
+
 然后完全退出并重新打开 Hermes Desktop（或重启当前 Hermes CLI 会话）。再次检查：
 
 ```bash
@@ -174,6 +181,12 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 
 如果 `/v1/models` 返回 401，说明当前 shell 没有加载 `COMMANDCODE_BRIDGE_API_KEY`；不要把 key 粘贴到聊天或日志中，直接重新执行第 3、4 步的本机配置。
 如果 `/v1/models` 返回 34 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
+
+> 版本注记（2026-09-08，Hermes v0.18.2 实测）：该版本的动态发现**正常**。
+> 无头复现 picker 同款路径（`list_authenticated_providers`，经
+> `hermes_cli.model_switch`）实测返回 `total_models=34`、`source=user-config`，
+> 与 `/v1/models` 一致。若在 v0.18.2 上看到 0 个模型，先重查 bridge health
+> 与 shell 环境变量（401 陷阱），不要直接归因于版本兼容性。
 
 > 关键原则：bridge 的 `/v1/models` 是模型目录的唯一权威来源；Hermes 配置只负责 provider 地址和认证，不要在两处维护两份容易漂移的模型白名单。
 
