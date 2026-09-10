@@ -2,6 +2,7 @@
 
 > 目标：让另一台机器上的 Hermes 也能通过本地 bridge 使用同一个 CommandCode 订阅。
 > 本手册是通用步骤，按当前已跑通的 macOS 实例整理（2026-09-02）。Windows / Linux 差异处已标注。
+> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/0001-canonical-models-only.patch` 两处本地补丁。
 > 全程不需要把 CommandCode Studio key 发给任何人或贴进聊天；key 只写进本机文件。
 
 ## 0. 前置条件核对
@@ -43,6 +44,9 @@ COMMANDCODE_ALLOWED_MODELS=gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,dee
 
 # (4) 本地补丁①开关：/v1/models 只列正式模型 ID，不混入别名（Hermes 列表才干净）
 COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY=true
+
+# (5) 向上游上报的 CLI 版本 —— 与本机 bridge 版本保持一致（上游升级后同步改，当前 1.53.0）
+COMMANDCODE_CLI_VERSION=1.53.0
 ```
 
 随机串生成（无需 openssl，node 即可）：
@@ -240,6 +244,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 | 模型请求 403 / model_not_found | 该模型不在白名单；改 `COMMANDCODE_ALLOWED_MODELS` 后重启 |
 | 返回上游余额/权限错误 | 安装本身健康，是订阅档位/额度问题；看日志：macOS `tail -50 ~/commandcode-bridge/bridge.stdout.log`，Windows 在启动窗口里直接可见 |
 | 想更新 bridge | `git -C ~/commandcode-bridge pull && cd ~/commandcode-bridge && npm install --include=dev && npm run build`，再重启服务 |
+| 直接 curl 调 `/v1/chat/completions` 报 502 `commandcode_empty_visible_response` | 推理模型会先把 token 预算花在思考上，可见文本还没出来预算就没了。把 `max_tokens` 调到 **≥ 32**（上游 `.env.example` 的 `COMMANDCODE_EMPTY_VISIBLE_*` 注释即写明此点）。`hermes chat` 自己设够了 token，走它不受影响 |
 
 ## 8. 本地定制补丁（⚠️ git pull 升级后需重打）
 
@@ -277,6 +282,13 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 **白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **34 个正式模型 ID**。
 Claude 系列（`claude-*`）不在 GOAT 内，Provider API 通道实测 403；目录里其余未列模型（如
 Kimi-K2.6/GLM-5.1/MiniMax-M2.7/Qwen3.7-Flash 等）也已随收紧移除。想加回某个模型：编辑 .env 该行追加 ID 后重启。
+
+**升级记录（2026-09-10）**：上游 `1.38.2.a → 1.53.0.a`（模型目录 62 → 70；新增 gpt-6-astra、claude-fable-5-1、
+muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均不在 GOAT 内所以列表无变化）。
+升级按：`git stash push -- src/config.ts src/types.ts` → `git pull --ff-only` → `git stash pop`
+（`src/config.ts` 自动合并成功，两处补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致）
+→ `npm install` → `npm run typecheck` / `lint` / `test`（226 passed）/ `build` 全绿 → 重启服务。
+⚠️ 升级后顺手把 `.env` 的 `COMMANDCODE_CLI_VERSION` 改成新版本号（1.53.0）再重启。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 
