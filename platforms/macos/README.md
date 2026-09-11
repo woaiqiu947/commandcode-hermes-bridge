@@ -7,7 +7,7 @@
 | 文件 | 用途 |
 |---|---|
 | `com.commandcode.bridge.plist` | launchd 自启配置（开机自动跑 bridge）。安装：复制到 `~/Library/LaunchAgents/`，改里面的用户路径，然后 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.commandcode.bridge.plist` |
-| `env.macos.example` | macOS 实际使用的 `.env` 脱敏模板（含 GOAT-34 白名单、本地补丁开关）。复制到 `~/commandcode-bridge/.env`，填入 `<填入你的值>` 处 |
+| `env.macos.example` | macOS 实际使用的 `.env` 脱敏模板（含 GOAT-34 + V4.1-Flash 共 35 个模型的白名单、本地补丁开关）。复制到 `~/commandcode-bridge/.env`，填入 `<填入你的值>` 处 |
 
 ## 路径约定（macOS）
 
@@ -22,3 +22,4 @@
 - 2026-09-08：资产整理进仓库，本目录创建。
 - 2026-09-08（第二台 mac 装机后对齐）：① 补丁改为 `git apply patches/0001-canonical-models-only.patch` 一键重打（patch 内字段为可选 `?: boolean`，测试零改动）；② Hermes 端不再维护静态 models 列表，改 `discover_models: true`（bridge `/v1/models` 唯一权威，手册 §5.1）；③ 本机实测 `gpt-5.6-luna` 报 region not available（`gpt-5.6-sol` 正常），provider `default_model` 定为 `deepseek/deepseek-v4-flash`；④ plist 用本目录模板（含 PATH + ProcessType）。
 - 2026-09-10：上游升级 **1.38.2.a → 1.53.0.a**（`git pull` 两个 commit：1.49.0 + 1.53.0，目录 62 → 70 个模型）。升级流程：`git stash push -- src/config.ts src/types.ts` → `git pull --ff-only` → `git stash pop`（`src/config.ts` 自动合并成功，补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致）→ `npm install` → `npm run typecheck` / `lint` / `test`（226 passed）/ `build` 全绿 → `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge`。另把 `.env` 的 `COMMANDCODE_CLI_VERSION` 由 1.38.2 改为 **1.53.0**（该值向上游上报 CLI 版本，应随 bridge 版本一起走）。验证：`/health` → `version: 1.53.0.a`、`/v1/models` 仍为 34 个正式 ID（无别名）、冒烟对话 200。⚠️ 直接 `curl` 调 `/v1/chat/completions` 时 `max_tokens` 必须 ≥ 32（推理模型会先消耗可见输出预算，否则 502 `commandcode_empty_visible_response`）。
+- 2026-09-11：DeepSeek 发布 **V4.1 Flash 正式版**，白名单 34 → **35**（主动放行 `deepseek/deepseek-v4.1-flash`，理由与旧名路由关系见手册 §6）。改动：`~/commandcode-bridge/.env`（已备份 `.env.bak-*`）+ 手册 + `config/env.example` + 本目录 `env.macos.example` + `platforms/pc/env.windows.example`。生效：`launchctl kickstart -k` → `/health` 35 个模型 → `hermes model --refresh`（Leave unchanged，默认模型未动）。验证：`/v1/chat/completions` 200，`hermes chat -Q --provider commandcode -m deepseek/deepseek-v4.1-flash` 正常返回。附带发现：客户端中断流时 bridge 会因未捕获 `AbortError` 退出（launchd 拉起），未修。

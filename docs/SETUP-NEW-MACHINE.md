@@ -39,8 +39,9 @@ COMMANDCODE_API_KEY=<你的key>
 # (2) 本地访问 key —— 自己生成一串随机数，仅本机 Hermes 用它访问 bridge
 BRIDGE_API_KEY=<随机串，生成方法见下>
 
-# (3) 白名单 = GOAT 套餐官方额度表（PDF）的 34 个模型，其余一律不提供
-COMMANDCODE_ALLOWED_MODELS=gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor
+# (3) 白名单 = GOAT 套餐官方额度表（PDF）的 34 个模型 + 主动放行的 1 个（`deepseek/deepseek-v4.1-flash`，
+#     2026-09-11 V4.1-Flash 正式版发布，Provider API 实测可用，共 35 个），其余一律不提供
+COMMANDCODE_ALLOWED_MODELS=gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor
 
 # (4) 本地补丁①开关：/v1/models 只列正式模型 ID，不混入别名（Hermes 列表才干净）
 COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY=true
@@ -96,7 +97,7 @@ hermes config set providers.commandcode.api "http://127.0.0.1:9992/v1"
 hermes config set providers.commandcode.key_env COMMANDCODE_BRIDGE_API_KEY
 hermes config set providers.commandcode.transport openai_chat
 hermes config set providers.commandcode.default_model "deepseek/deepseek-v4-flash"
-hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
+hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
 ```
 
 把第 2 步的 `BRIDGE_API_KEY` 追加进 Hermes 的私有 env（路径用命令查，别硬编码）：
@@ -131,7 +132,7 @@ hermes chat -Q --provider custom:commandcode -m Qwen/Qwen3.8-Max -q 'Reply exact
 curl -fsS http://127.0.0.1:9992/health
 ```
 
-`/health` 应返回 `status: ok`，并且 `models` 应为 GOAT 白名单中的 34 个正式模型 ID。
+`/health` 应返回 `status: ok`，并且 `models` 应为白名单中的 35 个正式模型 ID（GOAT 额度表 34 个 + 主动放行的 `deepseek/deepseek-v4.1-flash`）。
 如果 bridge 返回正常，问题通常在 Hermes 的 provider 配置格式，而不是上游账号或 bridge。
 
 ### 修复 Hermes 端的错误模型列表配置
@@ -171,7 +172,7 @@ hermes model
 - provider API 仍是 `http://127.0.0.1:9992/v1`
 - `discover_models: true`
 - 不再有形如 `models: '[...]'` 的字符串配置
-- 模型列表中的数量与 `curl http://127.0.0.1:9992/v1/models` 返回的 34 个正式 ID 一致
+- 模型列表中的数量与 `curl http://127.0.0.1:9992/v1/models` 返回的 35 个正式 ID 一致
 
 ### 如果列表仍为空
 
@@ -184,7 +185,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 ```
 
 如果 `/v1/models` 返回 401，说明当前 shell 没有加载 `COMMANDCODE_BRIDGE_API_KEY`；不要把 key 粘贴到聊天或日志中，直接重新执行第 3、4 步的本机配置。
-如果 `/v1/models` 返回 34 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
+如果 `/v1/models` 返回 35 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
 
 > 版本注记（2026-09-08，Hermes v0.18.2 实测）：该版本的动态发现**正常**。
 > 无头复现 picker 同款路径（`list_authenticated_providers`，经
@@ -194,7 +195,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 
 > 关键原则：bridge 的 `/v1/models` 是模型目录的唯一权威来源；Hermes 配置只负责 provider 地址和认证，不要在两处维护两份容易漂移的模型白名单。
 
-## 6. GOAT 套餐可用模型（34 个正式 ID，来源：GOAT 官方额度表 PDF）
+## 6. 白名单可用模型（35 个正式 ID：GOAT 官方额度表 34 个 + 主动放行 1 个）
 
 | 厂商 | 模型 ID（调用用这个） | 额度表显示名 |
 |---|---|---|
@@ -204,6 +205,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 | DeepSeek | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash (latest) |
 | DeepSeek | `deepseek/deepseek-v4-flash-fast` | DeepSeek V4 Flash Fast |
 | DeepSeek | `deepseek/deepseek-v4-flash-vision-exp` | DeepSeek V4 Flash Vision (exp) |
+| DeepSeek | `deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash ⚠️ 不在额度表内，2026-09-11 主动放行 |
 | 智谱 | `zai-org/GLM-5.2` | GLM-5.2 |
 | 智谱 | `zai-org/GLM-5.2-Fast` | GLM-5.2 Fast |
 | 智谱 | `zai-org/GLM-5.3` | GLM-5.3 |
@@ -232,6 +234,12 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 | Thinking Machines | `thinkingmachines/inkling-small` | Inkling Small |
 | Meta | `meta/muse-spark-1.2` | Muse Spark 1.2 |
 | Meta | `meta/muse-spark-1.2-contributor` | Muse Spark 1.2 Contributor |
+
+**⚠️ 唯一例外**：`deepseek/deepseek-v4.1-flash`（DeepSeek V4.1 Flash 正式版，2026-09-11 发布）**不在 GOAT 额度表 PDF 内**，
+但实测订阅的 Provider API 通道可用（`/v1/chat/completions` 返回 200，按 Flash 同价计费），故主动加入白名单。
+另需注意 DeepSeek 官方已把 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 两个旧名统一路由到 **V4.1-Flash**，
+且 **2026-09-14 12:00（北京时间）起 `deepseek-v4-pro` 也路由到 V4.1-Flash**——即上表里那几个 DeepSeek 名字
+现在后端是同一个模型，后续可随上游目录变化收敛（届时再动 `.env` 白名单 + 同步本手册）。
 
 不在上表的（含全部 `claude-*`、Kimi-K2.6/K2.5、GLM-5.1、MiniMax-M2.7、Qwen3.7-Flash 等）不在 GOAT 内，bridge 已收紧不放行。目录里出现过的 `deepseek-v4-pro` / `GLM-5.2` / `openai/gpt-5.6-luna` 等是别名变体，Hermes 里调用统一用上表带厂商前缀的 ID。
 
@@ -279,7 +287,8 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
          )
 ```
 
-**白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **34 个正式模型 ID**。
+**白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **34 个正式模型 ID** + 主动放行的
+`deepseek/deepseek-v4.1-flash`，共 **35 个**（放行理由与旧名路由关系见 §6）。
 Claude 系列（`claude-*`）不在 GOAT 内，Provider API 通道实测 403；目录里其余未列模型（如
 Kimi-K2.6/GLM-5.1/MiniMax-M2.7/Qwen3.7-Flash 等）也已随收紧移除。想加回某个模型：编辑 .env 该行追加 ID 后重启。
 
@@ -289,6 +298,16 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 （`src/config.ts` 自动合并成功，两处补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致）
 → `npm install` → `npm run typecheck` / `lint` / `test`（226 passed）/ `build` 全绿 → 重启服务。
 ⚠️ 升级后顺手把 `.env` 的 `COMMANDCODE_CLI_VERSION` 改成新版本号（1.53.0）再重启。
+
+**白名单变更（2026-09-11）**：`deepseek/deepseek-v4.1-flash`（DeepSeek V4.1 Flash **正式版**）加入
+`COMMANDCODE_ALLOWED_MODELS`（34 → **35**）。上游目录在 1.53.0 升级时就已出现该 ID，当时按"不在 GOAT 内"未放行；
+本次实测订阅的 Provider API 通道可用后放行。改动面：`~/commandcode-bridge/.env`（改前已备份 `.env.bak-*`）、
+本手册（§2 / §5.1 / §6 / §8）、`config/env.example`、`platforms/macos/env.macos.example`、`platforms/pc/env.windows.example`。
+生效与验证：`launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge` → `/health` 的 models 变 35 个 →
+`hermes model --refresh`（选 `Leave unchanged` 退出，**不动**默认模型）→ `POST /v1/chat/completions` 返回 200
+（`max_tokens` 需 ≥ 32）→ `hermes chat -Q --provider commandcode -m deepseek/deepseek-v4.1-flash -q '...'` 正常返回。
+顺带记录一条上游健壮性问题：客户端中断流式响应时 bridge 会抛未捕获 `AbortError`（`dist/server.js` 附近
+`Emitted 'error' event on Readable instance`）导致进程退出，靠 launchd `KeepAlive` 拉起；尚未修。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 
