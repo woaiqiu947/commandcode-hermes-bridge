@@ -1,0 +1,178 @@
+diff --git a/src/provider-chat.ts b/src/provider-chat.ts
+index c57815b..2a92f8d 100644
+--- a/src/provider-chat.ts
++++ b/src/provider-chat.ts
+@@ -102,7 +102,21 @@ export async function handleProviderChat(options: {
+       publicModel: resolvedModel.publicModel,
+       includeReasoning: config.includeReasoning,
+     });
+-    const stream = Readable.fromWeb(response.body as WebReadableStream<Uint8Array>).pipe(transform);
++    // 本地定制（2026-09-11）：客户端中断流式请求时不能让 bridge 进程退出。
++    // 触发链路：客户端断开 → server.ts 的 reply.raw "close" → signal.abort() → 上游 body
++    // 流以 AbortError 触发 'error'。Node 的 .pipe() 不会把源流错误转发给下游，源流本身又
++    // 没有 'error' 监听者，于是它升级成「未捕获的 error 事件」→ 进程 exit 1（上游 1.53.0.a
++    // 缺陷：实测每次客户端取消流式响应都会崩，2026-09-03 起本机 67 次崩溃全部由此而来）。
++    // 处理原则：客户端已断开（signal 已 abort 或错误为 AbortError）时静默结束下游流；
++    // 只有真实上游故障才把错误转给下游，交给 fastify 的错误通道。
++    const source = Readable.fromWeb(response.body as WebReadableStream<Uint8Array>);
++    source.on("error", (error: unknown) => {
++      if (transform.destroyed) return;
++      const aborted = signal.aborted || (error instanceof Error && error.name === "AbortError");
++      if (aborted) transform.destroy();
++      else transform.destroy(error instanceof Error ? error : new Error(String(error)));
++    });
++    const stream = source.pipe(transform);
+     reply
+       .type("text/event-stream; charset=utf-8")
+       .header("cache-control", "no-cache, no-transform")
+diff --git a/tests/provider-chat.test.ts b/tests/provider-chat.test.ts
+new file mode 100644
+index 0000000..3c40d56
+--- /dev/null
++++ b/tests/provider-chat.test.ts
+@@ -0,0 +1,145 @@
++import { once } from "node:events";
++import { Readable } from "node:stream";
++
++import type { FastifyReply, FastifyRequest } from "fastify";
++import { describe, expect, it, vi } from "vitest";
++
++import { loadBridgeConfig, type ResolvedModel } from "../src/config.js";
++import { handleProviderChat } from "../src/provider-chat.js";
++import type { CommandCodeProviderClient } from "../src/provider.js";
++import type { OpenAIChatCompletionRequest } from "../src/types.js";
++
++// 回归测试（2026-09-11）：客户端中断流式请求时，上游 body 流会以 AbortError 触发 'error'。
++// 修复前该错误没有任何监听者，会升级成未捕获的 'error' 事件直接把 bridge 进程打挂
++// （本机 2026-09-03 起 67 次崩溃全部由此而来）。
++
++const MODEL = "deepseek/deepseek-v4-pro";
++const REQUEST: OpenAIChatCompletionRequest = {
++  model: MODEL,
++  messages: [{ role: "user", content: "hi" }],
++  stream: true,
++  max_tokens: 64,
++};
++const RESOLVED: ResolvedModel = {
++  requestedModel: MODEL,
++  upstreamModel: MODEL,
++  publicModel: MODEL,
++};
++
++/** 上游 SSE 响应体：signal abort 时以 AbortError 报错，模拟真实上游被中断的行为。 */
++function abortableSseBody(signal: AbortSignal, chunks: string[]): ReadableStream<Uint8Array> {
++  const encoder = new TextEncoder();
++  return new ReadableStream<Uint8Array>({
++    start(controller) {
++      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
++      signal.addEventListener("abort", () => {
++        controller.error(new DOMException("This operation was aborted", "AbortError"));
++      });
++    },
++  });
++}
++
++/** 上游 SSE 响应体：延迟一个 tick 后以普通错误报错（真实上游故障，非客户端中断）。 */
++function failingSseBody(error: Error): ReadableStream<Uint8Array> {
++  return new ReadableStream<Uint8Array>({
++    start(controller) {
++      setTimeout(() => controller.error(error), 0);
++    },
++  });
++}
++
++function createFakeReply() {
++  const reply = {
++    sent: undefined as unknown,
++    sentStatusCode: undefined as number | undefined,
++    type() {
++      return reply;
++    },
++    header() {
++      return reply;
++    },
++    code(status: number) {
++      reply.sentStatusCode = status;
++      return reply;
++    },
++    send(payload: unknown) {
++      reply.sent = payload;
++      return reply;
++    },
++  };
++  return reply;
++}
++
++function createFakeRequest() {
++  return { id: "req-test", log: { warn: vi.fn(), info: vi.fn(), error: vi.fn() } };
++}
++
++function chatOptions(
++  response: Response,
++  signal: AbortSignal,
++  reply: ReturnType<typeof createFakeReply>,
++) {
++  return {
++    reply: reply as unknown as FastifyReply,
++    httpRequest: createFakeRequest() as unknown as FastifyRequest,
++    request: REQUEST,
++    providerClient: {
++      chat: async () => response,
++    } as unknown as CommandCodeProviderClient,
++    resolvedModel: RESOLVED,
++    signal,
++    config: loadBridgeConfig({ env: { COMMANDCODE_API_KEY: "test-key" }, authPaths: [] }),
++  };
++}
++
++describe("handleProviderChat streaming body errors", () => {
++  it("客户端中断流式响应时不让未捕获的 'error' 事件打挂进程", async () => {
++    const abortController = new AbortController();
++    const response = new Response(
++      abortableSseBody(abortController.signal, [
++        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
++      ]),
++      { status: 200, headers: { "content-type": "text/event-stream" } },
++    );
++    const reply = createFakeReply();
++
++    const handled = await handleProviderChat(chatOptions(response, abortController.signal, reply));
++    expect(handled).toBe(true);
++
++    const downstream = reply.sent as Readable;
++    expect(downstream).toBeInstanceOf(Readable);
++    downstream.resume(); // 模拟 fastify 消费下游流
++
++    // 捕获任何逃逸到进程级的未捕获异常：修复前 AbortError 会出现在这里
++    const uncaught: unknown[] = [];
++    const onUncaught = (error: unknown) => {
++      uncaught.push(error);
++    };
++    process.on("uncaughtException", onUncaught);
++    try {
++      abortController.abort();
++      await new Promise((resolve) => setTimeout(resolve, 100));
++    } finally {
++      process.off("uncaughtException", onUncaught);
++    }
++
++    expect(uncaught).toEqual([]);
++  });
++
++  it("真实上游故障仍然把错误传给下游，不被静默吞掉", async () => {
++    const upstreamError = new Error("simulated upstream body failure");
++    const abortController = new AbortController();
++    const response = new Response(failingSseBody(upstreamError), {
++      status: 200,
++      headers: { "content-type": "text/event-stream" },
++    });
++    const reply = createFakeReply();
++
++    const handled = await handleProviderChat(chatOptions(response, abortController.signal, reply));
++    expect(handled).toBe(true);
++
++    const downstream = reply.sent as Readable;
++    const [emitted] = (await once(downstream, "error")) as [Error];
++    expect(emitted).toBe(upstreamError);
++  });
++});

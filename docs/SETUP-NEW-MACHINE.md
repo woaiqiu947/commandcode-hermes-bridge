@@ -2,7 +2,8 @@
 
 > 目标：让另一台机器上的 Hermes 也能通过本地 bridge 使用同一个 CommandCode 订阅。
 > 本手册是通用步骤，按当前已跑通的 macOS 实例整理（2026-09-02）。Windows / Linux 差异处已标注。
-> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/0001-canonical-models-only.patch` 两处本地补丁。
+> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 两个本地补丁
+> （`0001-canonical-models-only.patch` 去别名 + 白名单唯一权威；`0002-stream-abort-error-handling.patch` 流式中断不再崩进程，见 §8）。
 > 全程不需要把 CommandCode Studio key 发给任何人或贴进聊天；key 只写进本机文件。
 
 ## 0. 前置条件核对
@@ -252,11 +253,18 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 | 模型请求 403 / model_not_found | 该模型不在白名单；改 `COMMANDCODE_ALLOWED_MODELS` 后重启 |
 | 返回上游余额/权限错误 | 安装本身健康，是订阅档位/额度问题；看日志：macOS `tail -50 ~/commandcode-bridge/bridge.stdout.log`，Windows 在启动窗口里直接可见 |
 | 想更新 bridge | `git -C ~/commandcode-bridge pull && cd ~/commandcode-bridge && npm install --include=dev && npm run build`，再重启服务 |
+| bridge 反复重启 / 日志出现 `AbortError` + `Emitted 'error' event on Readable instance` | 客户端取消流式请求导致进程退出的上游缺陷；本机已由 `patches/0002-stream-abort-error-handling.patch` 修掉（§8 ③）。若仍复现，说明补丁没打上或没重新 `npm run build`。计数：`grep -c AbortError ~/commandcode-bridge/bridge.stderr.log` |
 | 直接 curl 调 `/v1/chat/completions` 报 502 `commandcode_empty_visible_response` | 推理模型会先把 token 预算花在思考上，可见文本还没出来预算就没了。把 `max_tokens` 调到 **≥ 32**（上游 `.env.example` 的 `COMMANDCODE_EMPTY_VISIBLE_*` 注释即写明此点）。`hermes chat` 自己设够了 token，走它不受影响 |
 
 ## 8. 本地定制补丁（⚠️ git pull 升级后需重打）
 
-共两处，都在 `src/config.ts`。打完 `npm run build` 并重启服务。
+对应仓库 `patches/` 两个文件：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）
+与 **`0002-stream-abort-error-handling.patch`**（③，改 `src/provider-chat.ts` + 新增 `tests/provider-chat.test.ts`）。
+打完 `npm run build` 并重启服务；一键重打两个：
+
+```bash
+cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch && npm run build
+```
 
 **① 去别名开关**（2026-09-02）：上游 `publicModelList()` 把 `MODEL_ALIASES` 别名混进 `/v1/models` 输出，
 导致 Hermes 客户端列表同一模型出现多行（`gpt-5.6-luna` / `openai/gpt-5.6-luna` / `GPT-5.6-Luna`）。
@@ -287,6 +295,33 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
          )
 ```
 
+**③ 流式中断错误处理**（2026-09-11）：上游 `handleProviderChat()` 里
+`Readable.fromWeb(response.body).pipe(transform)` 的**来源流没有 `'error'` 监听者**，而 Node 的 `.pipe()`
+**不把源流错误转给下游**。客户端一旦中断流式请求（`server.ts` 的 `reply.raw` `"close"` → `signal.abort()`），
+上游 body 就以 `AbortError` 触发来源流的 `'error'`，随即升级成**未捕获的 error 事件 → 进程 exit 1**。
+实测本机 2026-09-03 起 **67 次崩溃全部由此而来**：每天日常约 1:1 触发（点「停止」/任何取消流式请求即崩，
+且崩掉会连带掐断该进程上所有在途请求）。
+⚠️ 注意 `server.ts` 里那个 `AbortError` 优雅处理只覆盖「中断发生在上游响应体挂上之前」的情形
+（错误被 throw 进 try/catch）；**SSE 一旦开始输出，错误走的是事件通道而非异常通道，必然绕过它**。
+
+补法 = 显式接管来源流的 `'error'`：客户端已断开则静默销毁下游，只有真实上游故障才把错误转下去：
+
+```diff
+-    const stream = Readable.fromWeb(response.body as WebReadableStream<Uint8Array>).pipe(transform);
++    const source = Readable.fromWeb(response.body as WebReadableStream<Uint8Array>);
++    source.on("error", (error: unknown) => {
++      if (transform.destroyed) return;
++      const aborted = signal.aborted || (error instanceof Error && error.name === "AbortError");
++      if (aborted) transform.destroy();
++      else transform.destroy(error instanceof Error ? error : new Error(String(error)));
++    });
++    const stream = source.pipe(transform);
+```
+
+回归测试 `tests/provider-chat.test.ts` 两条：① 客户端中断不得产生未捕获异常；② 真实上游故障仍须把错误传给
+下游（防止修过头把真错也一起吞掉）。**验证为 RED → GREEN**：还原补丁时两条用例均失败（Uncaught Exception），
+打上补丁后通过；`npm run test` 从 226 → **228 passed**，`typecheck` / `lint` / `build` 全绿。
+
 **白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **34 个正式模型 ID** + 主动放行的
 `deepseek/deepseek-v4.1-flash`，共 **35 个**（放行理由与旧名路由关系见 §6）。
 Claude 系列（`claude-*`）不在 GOAT 内，Provider API 通道实测 403；目录里其余未列模型（如
@@ -295,7 +330,8 @@ Kimi-K2.6/GLM-5.1/MiniMax-M2.7/Qwen3.7-Flash 等）也已随收紧移除。想�
 **升级记录（2026-09-10）**：上游 `1.38.2.a → 1.53.0.a`（模型目录 62 → 70；新增 gpt-6-astra、claude-fable-5-1、
 muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均不在 GOAT 内所以列表无变化）。
 升级按：`git stash push -- src/config.ts src/types.ts` → `git pull --ff-only` → `git stash pop`
-（`src/config.ts` 自动合并成功，两处补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致）
+（`src/config.ts` 自动合并成功，当时的两处补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致；
+`0002-stream-abort-error-handling.patch` 是 2026-09-11 才加的，同日另测）
 → `npm install` → `npm run typecheck` / `lint` / `test`（226 passed）/ `build` 全绿 → 重启服务。
 ⚠️ 升级后顺手把 `.env` 的 `COMMANDCODE_CLI_VERSION` 改成新版本号（1.53.0）再重启。
 
@@ -306,8 +342,9 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 生效与验证：`launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge` → `/health` 的 models 变 35 个 →
 `hermes model --refresh`（选 `Leave unchanged` 退出，**不动**默认模型）→ `POST /v1/chat/completions` 返回 200
 （`max_tokens` 需 ≥ 32）→ `hermes chat -Q --provider commandcode -m deepseek/deepseek-v4.1-flash -q '...'` 正常返回。
-顺带记录一条上游健壮性问题：客户端中断流式响应时 bridge 会抛未捕获 `AbortError`（`dist/server.js` 附近
-`Emitted 'error' event on Readable instance`）导致进程退出，靠 launchd `KeepAlive` 拉起；尚未修。
+顺带修掉一条上游健壮性问题并记入 §8 ③：客户端中断流式响应时 bridge 会因未捕获 `AbortError` 直接 exit 1
+（launchd `KeepAlive` 拉起），2026-09-03 起本机 67 次崩溃全由此而来；本次加 `patches/0002-stream-abort-error-handling.patch`
+修掉并补了回归测试。生产实例已重启并验证：中断流式请求后进程存活、服务可继续响应。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 

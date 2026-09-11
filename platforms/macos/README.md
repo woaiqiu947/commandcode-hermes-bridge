@@ -11,7 +11,7 @@
 
 ## 路径约定（macOS）
 
-- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了两处补丁，见仓库 `patches/`）
+- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 下两个补丁文件、共三处定制）
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
 - 日志：`~/commandcode-bridge/bridge.stdout.log` / `bridge.stderr.log`
 - Hermes provider 注册名：`custom:commandcode`（`providers.commandcode.api = http://127.0.0.1:9992/v1`）
@@ -22,4 +22,4 @@
 - 2026-09-08：资产整理进仓库，本目录创建。
 - 2026-09-08（第二台 mac 装机后对齐）：① 补丁改为 `git apply patches/0001-canonical-models-only.patch` 一键重打（patch 内字段为可选 `?: boolean`，测试零改动）；② Hermes 端不再维护静态 models 列表，改 `discover_models: true`（bridge `/v1/models` 唯一权威，手册 §5.1）；③ 本机实测 `gpt-5.6-luna` 报 region not available（`gpt-5.6-sol` 正常），provider `default_model` 定为 `deepseek/deepseek-v4-flash`；④ plist 用本目录模板（含 PATH + ProcessType）。
 - 2026-09-10：上游升级 **1.38.2.a → 1.53.0.a**（`git pull` 两个 commit：1.49.0 + 1.53.0，目录 62 → 70 个模型）。升级流程：`git stash push -- src/config.ts src/types.ts` → `git pull --ff-only` → `git stash pop`（`src/config.ts` 自动合并成功，补丁**无需改动**，`patches/0001-*.patch` 与升级后工作区逐行一致）→ `npm install` → `npm run typecheck` / `lint` / `test`（226 passed）/ `build` 全绿 → `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge`。另把 `.env` 的 `COMMANDCODE_CLI_VERSION` 由 1.38.2 改为 **1.53.0**（该值向上游上报 CLI 版本，应随 bridge 版本一起走）。验证：`/health` → `version: 1.53.0.a`、`/v1/models` 仍为 34 个正式 ID（无别名）、冒烟对话 200。⚠️ 直接 `curl` 调 `/v1/chat/completions` 时 `max_tokens` 必须 ≥ 32（推理模型会先消耗可见输出预算，否则 502 `commandcode_empty_visible_response`）。
-- 2026-09-11：DeepSeek 发布 **V4.1 Flash 正式版**，白名单 34 → **35**（主动放行 `deepseek/deepseek-v4.1-flash`，理由与旧名路由关系见手册 §6）。改动：`~/commandcode-bridge/.env`（已备份 `.env.bak-*`）+ 手册 + `config/env.example` + 本目录 `env.macos.example` + `platforms/pc/env.windows.example`。生效：`launchctl kickstart -k` → `/health` 35 个模型 → `hermes model --refresh`（Leave unchanged，默认模型未动）。验证：`/v1/chat/completions` 200，`hermes chat -Q --provider commandcode -m deepseek/deepseek-v4.1-flash` 正常返回。附带发现：客户端中断流时 bridge 会因未捕获 `AbortError` 退出（launchd 拉起），未修。
+- 2026-09-11：DeepSeek 发布 **V4.1 Flash 正式版**，白名单 34 → **35**（主动放行 `deepseek/deepseek-v4.1-flash`，理由与旧名路由关系见手册 §6）。改动：`~/commandcode-bridge/.env`（已备份 `.env.bak-*`）+ 手册 + `config/env.example` + 本目录 `env.macos.example` + `platforms/pc/env.windows.example`。生效：`launchctl kickstart -k` → `/health` 35 个模型 → `hermes model --refresh`（Leave unchanged，默认模型未动）。验证：`/v1/chat/completions` 200，`hermes chat -Q --provider commandcode -m deepseek/deepseek-v4.1-flash` 正常返回。附带发现并修掉一条上游健壮性问题：客户端中断流式响应时 bridge 因未捕获 `AbortError` 直接退出（launchd 拉起），2026-09-03 起本机 67 次崩溃全由此而来。修复导出为 `patches/0002-stream-abort-error-handling.patch`（`src/provider-chat.ts` 来源流加 `'error'` 接管 + 新增 `tests/provider-chat.test.ts` 两条回归用例），RED→GREEN 验证通过，`npm run test` 226 → 228 passed。生产实例已重启验证：中断后进程存活、服务继续可用。
