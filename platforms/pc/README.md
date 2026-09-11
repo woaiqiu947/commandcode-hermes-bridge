@@ -7,6 +7,7 @@
 | 文件 | 用途 |
 |---|---|
 | `env.windows.example` | PC 实际使用的 `.env` 脱敏模板（单 key 精简版，9 项）。复制到 `<bridge目录>/.env`，填入 `<填入你的值>` 处 |
+| `doctor.ps1` | **连接错误一键自检**（5 层定位：bridge 是否在跑 / 上游 key / 本地 key 一致 / 版本一致 / 凭证并发）。`powershell -ExecutionPolicy Bypass -File doctor.ps1`，配套 `docs/TROUBLESHOOTING-CONNECTION.md` |
 | `CommandCodeBridgeWatchdog.xml` | 任务计划程序 XML：每 1 分钟跑一次 watchdog。导入见下方「自启方案」 |
 | `watchdog_commandcode_bridge.py` | 健康检查 + 自动拉起脚本。**使用前把顶部 `NODE` / `BRIDGE_DIR` 路径中的 `your-user` 换成你的 Windows 用户名** |
 | `run-with-guard.mjs` | 启动守卫：吞上游流式断连 AbortError（上游 bug，node 直启 `dist/index.js` 会被打崩），真错误才退出交给 watchdog 拉起。复制到 bridge 仓库根目录使用 |
@@ -54,3 +55,6 @@
 - 2026-09-04：watchdog + 任务计划自启跑通（进程拉起由 `run-with-guard.mjs` 守卫）。
 - 2026-09-08：资产整理进仓库，本目录由占位改为实际内容。
 - 2026-09-11（**待 PC 同步，mac 侧已改**）：① 白名单 34 → **35**，加 `deepseek/deepseek-v4.1-flash`；② 默认模型改 `deepseek/deepseek-v4.1-flash`（原 `deepseek/deepseek-v4-pro`）。命名对照与判定证据见手册 §6——**注意 CommandCode 与 DeepSeek 官方渠道的 V4.1 名字不同**（bridge 侧用 `deepseek/deepseek-v4.1-flash`，官方 API 用 `deepseek-flash`）。③ 可选：打 `patches/0002` 后去掉 `run-with-guard.mjs` 的 AbortError 兜底。
+- 2026-09-11：新增 `doctor.ps1`（连接错误一键自检），配套平台无关文档 `docs/TROUBLESHOOTING-CONNECTION.md`。
+  说明：本机用 `run-with-guard.mjs` 在**运行时**吞掉上游 AbortError（见上「文件清单」），而 mac 侧是在
+  **源码**层用 `patches/0002-stream-abort-error-handling.patch` 修同一缺陷——两种修法等价，PC 维持现有守卫方案即可。

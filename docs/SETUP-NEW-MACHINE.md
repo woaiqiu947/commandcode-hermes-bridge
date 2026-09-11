@@ -283,6 +283,11 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 
 ## 7. 故障排查
 
+> **“连接不上 / 模型不能用”这类问题**有一份专门的**分层定位手册**：
+> **[TROUBLESHOOTING-CONNECTION.md](TROUBLESHOOTING-CONNECTION.md)** —— 按 5 层从下往上查，
+> 含 **Windows PowerShell** 与 **macOS** 的一键自检脚本（`platforms/pc/doctor.ps1` / `scripts/doctor.sh`）。
+> 下表演是速查表，覆盖面更广；连接类问题优先用那份分层手册。
+
 | 症状 | 处理 |
 |---|---|
 | `hermes chat` 报连不上 127.0.0.1:9992 | bridge 没起：macOS `launchctl print gui/$(id -u)/com.commandcode.bridge`；Windows 看 Startup 文件夹的 cmd 是否被执行（双击试跑） |
