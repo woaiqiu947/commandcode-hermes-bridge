@@ -30,11 +30,12 @@
 - **逻辑**（watchdog 脚本内）：`/health` 通 → 无事退出；不通但有 bridge node 进程 → 等下一轮；都不满足 → `node run-with-guard.mjs` 拉起（`CREATE_NO_WINDOW`），6 秒后复查
 - **注意**：任务与脚本中的 `<user>` 均为占位符（本机实测用户名），**使用前必须替换**：改 watchdog 顶部 `NODE`/`BRIDGE_DIR` 常量 → 放脚本到 hermes scripts 目录 → `schtasks /Create /TN CommandCodeBridgeWatchdog /XML CommandCodeBridgeWatchdog.xml /F`
 
-## 补丁状态（与 mac 相同，2026-09-02 已应用）
+## 补丁状态
 
-- `patches/0001-canonical-models-only.patch` 两处本地定制（env 白名单唯一权威 + `/v1/models` 去别名只列正式 ID）**已在本地 `src/config.ts` / `src/types.ts` 应用**。
-- 验证方法：`git apply --check patches/0001-canonical-models-only.patch` 报 `patch does not apply` = 已打；`src/config.ts` 内有 `// 本地定制（2026-09-02）` 注释。
-- 上游 `git pull` 后需重打：`git apply patches/0001-canonical-models-only.patch`，然后 `npm run build`（若上游已合入则跳过）。
+- `patches/0001-canonical-models-only.patch` 两处本地定制（env 白名单唯一权威 + `/v1/models` 去别名只列正式 ID）**已在本地 `src/config.ts` / `src/types.ts` 应用**（2026-09-02）。
+- `patches/0002-stream-abort-error-handling.patch`（2026-09-11，**mac 侧新增**）：修「客户端中断流式请求 → 未捕获 `AbortError` → bridge 进程退出」。**PC 若还没打，仍靠 `run-with-guard.mjs` 吞错误兜着**（见下表"启动方式"）——功能上不阻塞，但打上后可去掉那层 guard 兜底逻辑。
+- 验证方法：`git apply --check patches/0001-canonical-models-only.patch` 报 `patch does not apply` = 已打；`src/config.ts` 内有 `// 本地定制（2026-09-02）` 注释；`src/provider-chat.ts` 内有 `source.on("error"` = 0002 已打。
+- 上游 `git pull` 后需重打：`git apply patches/0001-canonical-models-only.patch patches/0002-stream-abort-error-handling.patch`，然后 `npm run build`（若上游已合入则跳过）。
 
 ## 与 macOS 的差异
 
@@ -52,3 +53,4 @@
 
 - 2026-09-04：watchdog + 任务计划自启跑通（进程拉起由 `run-with-guard.mjs` 守卫）。
 - 2026-09-08：资产整理进仓库，本目录由占位改为实际内容。
+- 2026-09-11（**待 PC 同步，mac 侧已改**）：① 白名单 34 → **35**，加 `deepseek/deepseek-v4.1-flash`；② 默认模型改 `deepseek/deepseek-v4.1-flash`（原 `deepseek/deepseek-v4-pro`）。命名对照与判定证据见手册 §6——**注意 CommandCode 与 DeepSeek 官方渠道的 V4.1 名字不同**（bridge 侧用 `deepseek/deepseek-v4.1-flash`，官方 API 用 `deepseek-flash`）。③ 可选：打 `patches/0002` 后去掉 `run-with-guard.mjs` 的 AbortError 兜底。

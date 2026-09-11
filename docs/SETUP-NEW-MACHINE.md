@@ -49,6 +49,10 @@ COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY=true
 
 # (5) 向上游上报的 CLI 版本 —— 与本机 bridge 版本保持一致（上游升级后同步改，当前 1.53.0）
 COMMANDCODE_CLI_VERSION=1.53.0
+
+# (6) 默认模型 —— 客户端未显式指定 model 时用它。V4.1-Flash 正式版（2026-09-11 起；旧默认 v4-pro
+#     自 2026-09-14 12:00 起也会被官方路由到 V4.1-Flash，直接写 V4.1 的 ID 更明确）
+COMMANDCODE_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash
 ```
 
 随机串生成（无需 openssl，node 即可）：
@@ -97,7 +101,7 @@ hermes config set providers.commandcode.name commandcode
 hermes config set providers.commandcode.api "http://127.0.0.1:9992/v1"
 hermes config set providers.commandcode.key_env COMMANDCODE_BRIDGE_API_KEY
 hermes config set providers.commandcode.transport openai_chat
-hermes config set providers.commandcode.default_model "deepseek/deepseek-v4-flash"
+hermes config set providers.commandcode.default_model "deepseek/deepseek-v4.1-flash"
 hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
 ```
 
@@ -112,7 +116,7 @@ echo "COMMANDCODE_BRIDGE_API_KEY=<你的BRIDGE_API_KEY>" >> "$HERMES_ENV"   # Wi
 
 ```bash
 hermes config set model.provider custom:commandcode
-hermes config set model.default deepseek/deepseek-v4-flash
+hermes config set model.default deepseek/deepseek-v4.1-flash
 ```
 
 ## 5. 冒烟测试
@@ -121,6 +125,7 @@ hermes config set model.default deepseek/deepseek-v4-flash
 hermes chat -Q --provider custom:commandcode -m gpt-5.6-luna -q 'Reply exactly COMMANDCODE_HERMES_OK'
 hermes chat -Q --provider custom:commandcode -m zai-org/GLM-5.2 -q 'Reply exactly GLM_OK'
 hermes chat -Q --provider custom:commandcode -m Qwen/Qwen3.8-Max -q 'Reply exactly GOAT_OK'
+hermes chat -Q --provider custom:commandcode -m deepseek/deepseek-v4.1-flash -q 'Reply exactly DS41_OK'
 ```
 
 都原样返回即成功。
@@ -238,9 +243,18 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 
 **⚠️ 唯一例外**：`deepseek/deepseek-v4.1-flash`（DeepSeek V4.1 Flash 正式版，2026-09-11 发布）**不在 GOAT 额度表 PDF 内**，
 但实测订阅的 Provider API 通道可用（`/v1/chat/completions` 返回 200，按 Flash 同价计费），故主动加入白名单。
-另需注意 DeepSeek 官方已把 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 两个旧名统一路由到 **V4.1-Flash**，
-且 **2026-09-14 12:00（北京时间）起 `deepseek-v4-pro` 也路由到 V4.1-Flash**——即上表里那几个 DeepSeek 名字
-现在后端是同一个模型，后续可随上游目录变化收敛（届时再动 `.env` 白名单 + 同步本手册）。
+
+**V4.1-Flash 的名字：两个渠道不一样（2026-09-11 实测）**
+
+| 渠道 | V4.1-Flash 的正确名字 | 旧名（仍可用但不该再用） | 判定依据与强度 |
+|---|---|---|---|
+| CommandCode（本 bridge） | `deepseek/deepseek-v4.1-flash` | `deepseek/deepseek-v4-flash`（目录显示名 "DeepSeek V4 Flash (latest)"） | 旧名实测**能读图**（视觉属 V4.1-Flash 的能力；旧的视觉 ID `deepseek/deepseek-v4-flash-vision-exp` 已无可用 provider，报 400 `No available providers match the 'only' filter: deepseek`）。⚠️ **强证据但非证明**：CommandCode 的 `system_fingerprint` **每次请求都随机变**（同模型 4 次得 4 个不同值），因此指纹在 CommandCode 侧不能当模型标识 |
+| DeepSeek 官方 API | **`deepseek-flash`** | `deepseek-v4-flash` | **确定**：① 官方文档明写旧名对应模型已退役、请求由 V4.1-Flash 承接；② 实测 `deepseek-flash` 与旧名返回**相同** `system_fingerprint`（`aeb56401ca74e127821c4f9126dcb669`）且两者都能读图；③ 官方**不接受** `deepseek-v4.1-flash`（400：仅支持 `deepseek-flash` / `deepseek-v4-pro`） |
+
+⚠️ 注意上面这条**只对 DeepSeek 官方渠道成立**：bridge 走的是 CommandCode 的 Provider API，不能把官方的旧名路由结论直接套到
+CommandCode 的目录上（早期版本的本手册曾这么写过，已更正）。
+另：官方 `deepseek-v4-pro` 自 **2026-09-14 12:00（北京时间）** 起也路由到 V4.1-Flash；截至 2026-09-11 其官方指纹
+（`a307abda487cd1b463329ccb945ce396`）仍与 flash 不同，即尚未切换。
 
 不在上表的（含全部 `claude-*`、Kimi-K2.6/K2.5、GLM-5.1、MiniMax-M2.7、Qwen3.7-Flash 等）不在 GOAT 内，bridge 已收紧不放行。目录里出现过的 `deepseek-v4-pro` / `GLM-5.2` / `openai/gpt-5.6-luna` 等是别名变体，Hermes 里调用统一用上表带厂商前缀的 ID。
 
@@ -345,6 +359,20 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 顺带修掉一条上游健壮性问题并记入 §8 ③：客户端中断流式响应时 bridge 会因未捕获 `AbortError` 直接 exit 1
 （launchd `KeepAlive` 拉起），2026-09-03 起本机 67 次崩溃全由此而来；本次加 `patches/0002-stream-abort-error-handling.patch`
 修掉并补了回归测试。生产实例已重启并验证：中断流式请求后进程存活、服务可继续响应。
+
+**模型名对齐 V4.1-Flash（2026-09-11）**：确认两条渠道的 V4.1-Flash 名字后统一改名（命名对照与证据见 §6）。改动面：
+
+| 位置 | 原值 | 新值 |
+|---|---|---|
+| Hermes `providers.commandcode.default_model` | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4.1-flash` |
+| bridge `.env` `COMMANDCODE_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-v4.1-flash` |
+| Hermes MoA 聚合器（**DeepSeek 官方** provider）`moa.aggregator.model` + `moa.presets.default.aggregator.model` | `deepseek-v4-flash`（旧名） | `deepseek-flash`（V4.1 正式名） |
+| cron 日报 `89ebfc3149f0` / 周报 `0d0aacfae6ef` 的 model | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4.1-flash` |
+| `config/env.example`、`platforms/macos/env.macos.example`、`platforms/pc/env.windows.example` 的 `COMMANDCODE_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-v4.1-flash` |
+
+cron 的 model 是 user-owned 字段，`cronjob` 工具改不了，须用 `hermes cron edit <job_id> --model ...`。
+生效验证：`launchctl kickstart -k` → `/health` 的 `default_model` 变 `deepseek/deepseek-v4.1-flash`；
+`hermes config get providers.commandcode.default_model`、`hermes cron list` 复核。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 
