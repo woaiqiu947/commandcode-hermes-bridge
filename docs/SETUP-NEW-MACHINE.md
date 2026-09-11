@@ -119,6 +119,11 @@ hermes config set model.provider custom:commandcode
 hermes config set model.default deepseek/deepseek-v4.1-flash
 ```
 
+> ⚠️ **改 `default_model` 只影响新建会话。** Hermes 会话在**创建时**把模型钉死（落库到 `sessions.model`），
+> 已存在的会话/正在进行的对话继续用它创建时那个模型，改配置**不会追溯**。
+> 想让某个已有会话换模型：在桌面端模型选择器里切，或新开一个会话（CLI 没有"改已有会话模型"的子命令）。
+> 查证：`sqlite3 ~/.hermes/state.db "select id, model from sessions order by started_at desc limit 5;"`。
+
 ## 5. 冒烟测试
 
 ```bash
@@ -244,15 +249,33 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 **⚠️ 唯一例外**：`deepseek/deepseek-v4.1-flash`（DeepSeek V4.1 Flash 正式版，2026-09-11 发布）**不在 GOAT 额度表 PDF 内**，
 但实测订阅的 Provider API 通道可用（`/v1/chat/completions` 返回 200，按 Flash 同价计费），故主动加入白名单。
 
-**V4.1-Flash 的名字：两个渠道不一样（2026-09-11 实测）**
+**V4.1-Flash 的 ID 选择：滚动别名 vs 钉版（2026-09-11 实测）**
 
-| 渠道 | V4.1-Flash 的正确名字 | 旧名（仍可用但不该再用） | 判定依据与强度 |
+CommandCode 目录里同一个模型今天有**两个**可用 ID：
+
+| ID | 上游显示名 | 价格（目录 notes） | 性质 |
 |---|---|---|---|
-| CommandCode（本 bridge） | `deepseek/deepseek-v4.1-flash` | `deepseek/deepseek-v4-flash`（目录显示名 "DeepSeek V4 Flash (latest)"） | 旧名实测**能读图**（视觉属 V4.1-Flash 的能力；旧的视觉 ID `deepseek/deepseek-v4-flash-vision-exp` 已无可用 provider，报 400 `No available providers match the 'only' filter: deepseek`）。⚠️ **强证据但非证明**：CommandCode 的 `system_fingerprint` **每次请求都随机变**（同模型 4 次得 4 个不同值），因此指纹在 CommandCode 侧不能当模型标识 |
-| DeepSeek 官方 API | **`deepseek-flash`** | `deepseek-v4-flash` | **确定**：① 官方文档明写旧名对应模型已退役、请求由 V4.1-Flash 承接；② 实测 `deepseek-flash` 与旧名返回**相同** `system_fingerprint`（`aeb56401ca74e127821c4f9126dcb669`）且两者都能读图；③ 官方**不接受** `deepseek-v4.1-flash`（400：仅支持 `deepseek-flash` / `deepseek-v4-pro`） |
+| `deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash | $0.15/M in · $0.6/M out | **版本钉死**（新版发布后会变旧） |
+| `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash **(latest)** | $0.15/M in · $0.6/M out | **滚动别名**（跟随最新 Flash） |
 
-⚠️ 注意上面这条**只对 DeepSeek 官方渠道成立**：bridge 走的是 CommandCode 的 Provider API，不能把官方的旧名路由结论直接套到
-CommandCode 的目录上（早期版本的本手册曾这么写过，已更正）。
+判据：**价格与上下文完全一致** ＋ 上游把 v4-flash 标为 **"(latest)"** ＋ 实测两者都能读图
+（视觉属 V4.1-Flash 能力；旧的视觉 ID `deepseek/deepseek-v4-flash-vision-exp` 上游已无可用 provider，
+报 400 `No available providers match the 'only' filter: deepseek`）。
+⚠️ 强度：**强证据但非证明**——CommandCode 的 `system_fingerprint` **每次请求都随机变**
+（同模型 4 次得 4 个不同值），不能当模型标识。
+
+**本机口径**：默认模型取**钉死版** `deepseek/deepseek-v4.1-flash`——名字即实际模型、可复现；
+代价是将来新版发布要手动跟。想自动跟随新版本，把默认换成滚动别名 `deepseek/deepseek-v4-flash` 即可（同价、同上下文）。
+
+**两个渠道务必区分（同一模型、名字不同）**：
+
+| 渠道 | V4.1-Flash 的正式名 | 另一个可用名 | 说明 |
+|---|---|---|---|
+| CommandCode（本 bridge） | `deepseek/deepseek-v4.1-flash`（本机默认，钉死） | `deepseek/deepseek-v4-flash` | 后者是**滚动别名 "(latest)"**，**不是**退役名 |
+| DeepSeek 官方 API | **`deepseek-flash`** | `deepseek-v4-flash` | 后者是**退役旧名**。官方判据（**确定**）：① 文档明写旧名退役、请求由 V4.1-Flash 承接；② 正式名与旧名返回**相同** `system_fingerprint`（`aeb56401ca74e127821c4f9126dcb669`）且都能读图；③ 官方**不接受** `deepseek-v4.1-flash`（400：仅支持 `deepseek-flash` / `deepseek-v4-pro`） |
+
+⚠️ 不要把官方那条"旧名退役"结论套到 CommandCode 目录上——bridge 走的是 CommandCode Provider API，
+那边 v4-flash 是滚动别名而非退役名（本手册早期版本曾写错，已更正）。
 另：官方 `deepseek-v4-pro` 自 **2026-09-14 12:00（北京时间）** 起也路由到 V4.1-Flash；截至 2026-09-11 其官方指纹
 （`a307abda487cd1b463329ccb945ce396`）仍与 flash 不同，即尚未切换。
 
@@ -267,6 +290,7 @@ CommandCode 的目录上（早期版本的本手册曾这么写过，已更正�
 | 模型请求 403 / model_not_found | 该模型不在白名单；改 `COMMANDCODE_ALLOWED_MODELS` 后重启 |
 | 返回上游余额/权限错误 | 安装本身健康，是订阅档位/额度问题；看日志：macOS `tail -50 ~/commandcode-bridge/bridge.stdout.log`，Windows 在启动窗口里直接可见 |
 | 想更新 bridge | `git -C ~/commandcode-bridge pull && cd ~/commandcode-bridge && npm install --include=dev && npm run build`，再重启服务 |
+| 改了 `default_model` 但当前对话/新会话还是旧模型 | 会话在**创建时**钉死模型（`sessions.model`），改配置**不追溯**已存在的会话。新开会话，或在客户端模型选择器里切。查证：`sqlite3 ~/.hermes/state.db "select id, model from sessions order by started_at desc limit 5;"` |
 | bridge 反复重启 / 日志出现 `AbortError` + `Emitted 'error' event on Readable instance` | 客户端取消流式请求导致进程退出的上游缺陷；本机已由 `patches/0002-stream-abort-error-handling.patch` 修掉（§8 ③）。若仍复现，说明补丁没打上或没重新 `npm run build`。计数：`grep -c AbortError ~/commandcode-bridge/bridge.stderr.log` |
 | 直接 curl 调 `/v1/chat/completions` 报 502 `commandcode_empty_visible_response` | 推理模型会先把 token 预算花在思考上，可见文本还没出来预算就没了。把 `max_tokens` 调到 **≥ 32**（上游 `.env.example` 的 `COMMANDCODE_EMPTY_VISIBLE_*` 注释即写明此点）。`hermes chat` 自己设够了 token，走它不受影响 |
 
@@ -373,6 +397,18 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 cron 的 model 是 user-owned 字段，`cronjob` 工具改不了，须用 `hermes cron edit <job_id> --model ...`。
 生效验证：`launchctl kickstart -k` → `/health` 的 `default_model` 变 `deepseek/deepseek-v4.1-flash`；
 `hermes config get providers.commandcode.default_model`、`hermes cron list` 复核。
+
+补充记录（2026-09-11 同日复查）：
+
+1. **顺带修掉仓库自身的内部不一致**：此前手册/macos README 记"Hermes 默认 `deepseek/deepseek-v4-flash`"，
+   而三个 env 模板的 `COMMANDCODE_DEFAULT_MODEL` 却是 `deepseek/deepseek-v4-pro`——两处长期不符。
+   本次统一为 `deepseek/deepseek-v4.1-flash`。
+2. **默认为何取钉死版而非滚动别名**：CommandCode 目录里 `deepseek/deepseek-v4-flash` 是滚动别名
+   （上游名带 "(latest)"），`deepseek/deepseek-v4.1-flash` 是版本钉死 SKU；今天两者同价同上下文。
+   取钉死版是为了**名字即实际模型、可复现**；将来新版发布需手动跟（想自动跟随就换回别名，见 §6）。
+3. **改 `default_model` 只影响新建会话**：Hermes 会话在创建时把模型写进 `sessions.model`，已存在的会话
+   （含改名当时正在进行的对话）继续用旧模型，**改配置不会追溯**——这是当时"改了配置但对话里还是
+   `deepseek-v4-flash`"的原因，不是配置没生效。要换已有会话：客户端模型选择器里切，或新开会话。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 
