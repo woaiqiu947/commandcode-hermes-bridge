@@ -2,8 +2,9 @@
 
 > 目标：让另一台机器上的 Hermes 也能通过本地 bridge 使用同一个 CommandCode 订阅。
 > 本手册是通用步骤，按当前已跑通的 macOS 实例整理（2026-09-02）。Windows / Linux 差异处已标注。
-> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 两个本地补丁
-> （`0001-canonical-models-only.patch` 去别名 + 白名单唯一权威；`0002-stream-abort-error-handling.patch` 流式中断不再崩进程，见 §8）。
+> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 三个本地补丁
+> （`0001-canonical-models-only.patch` 去别名 + 白名单唯一权威；`0002-stream-abort-error-handling.patch` 流式中断不再崩进程；
+> `0003-cooldown-cleared-on-success.patch` 请求成功后清除残留冷却，见 §8）。
 > 全程不需要把 CommandCode Studio key 发给任何人或贴进聊天；key 只写进本机文件。
 
 ## 0. 前置条件核对
@@ -40,9 +41,10 @@ COMMANDCODE_API_KEY=<你的key>
 # (2) 本地访问 key —— 自己生成一串随机数，仅本机 Hermes 用它访问 bridge
 BRIDGE_API_KEY=<随机串，生成方法见下>
 
-# (3) 白名单 = GOAT 套餐官方额度表（PDF）的 34 个模型 + 主动放行的 1 个（`deepseek/deepseek-v4.1-flash`，
-#     2026-09-11 V4.1-Flash 正式版发布，Provider API 实测可用，共 35 个），其余一律不提供
-COMMANDCODE_ALLOWED_MODELS=gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor
+# (3) 白名单 = GOAT 套餐官方额度表（PDF）的 31 个模型 + 主动放行的 1 个（`deepseek/deepseek-v4.1-flash`，
+#     共 32 个）。旧 deepseek v4-flash / -fast / -vision-exp 三个 ID 已由官方路由到 V4.1-Flash（-vision-exp
+#     上游已无 provider），故移除、只留钉死版 v4.1-flash，其余一律不提供
+COMMANDCODE_ALLOWED_MODELS=gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor
 
 # (4) 本地补丁①开关：/v1/models 只列正式模型 ID，不混入别名（Hermes 列表才干净）
 COMMANDCODE_PUBLIC_MODELS_CANONICAL_ONLY=true
@@ -102,7 +104,7 @@ hermes config set providers.commandcode.api "http://127.0.0.1:9992/v1"
 hermes config set providers.commandcode.key_env COMMANDCODE_BRIDGE_API_KEY
 hermes config set providers.commandcode.transport openai_chat
 hermes config set providers.commandcode.default_model "deepseek/deepseek-v4.1-flash"
-hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-flash-fast,deepseek/deepseek-v4-flash-vision-exp,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
+hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
 ```
 
 把第 2 步的 `BRIDGE_API_KEY` 追加进 Hermes 的私有 env（路径用命令查，别硬编码）：
@@ -143,7 +145,7 @@ hermes chat -Q --provider custom:commandcode -m deepseek/deepseek-v4.1-flash -q 
 curl -fsS http://127.0.0.1:9992/health
 ```
 
-`/health` 应返回 `status: ok`，并且 `models` 应为白名单中的 35 个正式模型 ID（GOAT 额度表 34 个 + 主动放行的 `deepseek/deepseek-v4.1-flash`）。
+`/health` 应返回 `status: ok`，并且 `models` 应为白名单中的 32 个正式模型 ID（GOAT 额度表 31 个 + 主动放行的 `deepseek/deepseek-v4.1-flash`；旧 v4-flash/-fast/-vision-exp 已移除）。
 如果 bridge 返回正常，问题通常在 Hermes 的 provider 配置格式，而不是上游账号或 bridge。
 
 ### 修复 Hermes 端的错误模型列表配置
@@ -183,7 +185,7 @@ hermes model
 - provider API 仍是 `http://127.0.0.1:9992/v1`
 - `discover_models: true`
 - 不再有形如 `models: '[...]'` 的字符串配置
-- 模型列表中的数量与 `curl http://127.0.0.1:9992/v1/models` 返回的 35 个正式 ID 一致
+- 模型列表中的数量与 `curl http://127.0.0.1:9992/v1/models` 返回的 32 个正式 ID 一致
 
 ### 如果列表仍为空
 
@@ -196,7 +198,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 ```
 
 如果 `/v1/models` 返回 401，说明当前 shell 没有加载 `COMMANDCODE_BRIDGE_API_KEY`；不要把 key 粘贴到聊天或日志中，直接重新执行第 3、4 步的本机配置。
-如果 `/v1/models` 返回 35 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
+如果 `/v1/models` 返回 32 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
 
 > 版本注记（2026-09-08，Hermes v0.18.2 实测）：该版本的动态发现**正常**。
 > 无头复现 picker 同款路径（`list_authenticated_providers`，经
@@ -206,16 +208,13 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 
 > 关键原则：bridge 的 `/v1/models` 是模型目录的唯一权威来源；Hermes 配置只负责 provider 地址和认证，不要在两处维护两份容易漂移的模型白名单。
 
-## 6. 白名单可用模型（35 个正式 ID：GOAT 官方额度表 34 个 + 主动放行 1 个）
+## 6. 白名单可用模型（32 个正式 ID：GOAT 官方额度表 31 个 + 主动放行 1 个）
 
 | 厂商 | 模型 ID（调用用这个） | 额度表显示名 |
 |---|---|---|
 | OpenAI 系 | `gpt-5.6-sol` | GPT-5.6 Sol |
 | OpenAI 系 | `gpt-5.6-luna` | GPT-5.6 Luna |
 | DeepSeek | `deepseek/deepseek-v4-pro` | DeepSeek V4 Pro (latest) |
-| DeepSeek | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash (latest) |
-| DeepSeek | `deepseek/deepseek-v4-flash-fast` | DeepSeek V4 Flash Fast |
-| DeepSeek | `deepseek/deepseek-v4-flash-vision-exp` | DeepSeek V4 Flash Vision (exp) |
 | DeepSeek | `deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash ⚠️ 不在额度表内，2026-09-11 主动放行 |
 | 智谱 | `zai-org/GLM-5.2` | GLM-5.2 |
 | 智谱 | `zai-org/GLM-5.2-Fast` | GLM-5.2 Fast |
@@ -265,7 +264,8 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 （同模型 4 次得 4 个不同值），不能当模型标识。
 
 **本机口径**：默认模型取**钉死版** `deepseek/deepseek-v4.1-flash`——名字即实际模型、可复现；
-代价是将来新版发布要手动跟。想自动跟随新版本，把默认换成滚动别名 `deepseek/deepseek-v4-flash` 即可（同价、同上下文）。
+代价是将来新版发布要手动跟。2026-09-11 起滚动别名 `deepseek/deepseek-v4-flash`（及 -fast、-vision-exp）已从白名单移除，
+模型选择器只显示 `v4-pro` + `v4.1-flash`；要恢复"自动跟随最新"需把滚动别名 ID 加回 `.env` 白名单并重启。
 
 **两个渠道务必区分（同一模型、名字不同）**：
 
@@ -301,13 +301,22 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 
 ## 8. 本地定制补丁（⚠️ git pull 升级后需重打）
 
-对应仓库 `patches/` 两个文件：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）
-与 **`0002-stream-abort-error-handling.patch`**（③，改 `src/provider-chat.ts` + 新增 `tests/provider-chat.test.ts`）。
-打完 `npm run build` 并重启服务；一键重打两个：
+对应仓库 `patches/` 三个文件：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）、
+**`0002-stream-abort-error-handling.patch`**（③，改 `src/provider-chat.ts` + 新增 `tests/provider-chat.test.ts`）、
+**`0003-cooldown-cleared-on-success.patch`**（④，改 `src/credential-router.ts` + `tests/credential-router.test.ts` / `tests/provider.test.ts`）。
+打完 `npm run build` 并重启服务；一键重打三个：
 
 ```bash
-cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch && npm run build
+cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch && npm run build
 ```
+
+另有**几处不进补丁的本地改动**（上游树里没有或以本地状态存在，`git pull` 一般不会冲突）：
+
+- `~/commandcode-bridge/.env`（本地配置，含 key，**永不入库**）；
+- `~/commandcode-bridge/SETUP-NEW-MACHINE.md`（本手册的镜像副本，便于现场查阅）——**改了本手册要记得 `cp docs/SETUP-NEW-MACHINE.md ~/commandcode-bridge/` 同步**；
+- `~/commandcode-bridge/.prettierignore` 末尾的一行 `SETUP-NEW-MACHINE.md`（⚠️ 这个文件**是上游跟踪文件**，改动属于本地定制）：
+  镜像副本须与仓库版逐字节一致，不能被 Prettier 重排，故排除。**没这一行时 `npm run verify` 会卡在 `format:check`**
+  （曾长期如此，2026-09-14 加行后首次全程退出码 0：typecheck / lint / format:check / 231 tests / build 全绿）。
 
 **① 去别名开关**（2026-09-02）：上游 `publicModelList()` 把 `MODEL_ALIASES` 别名混进 `/v1/models` 输出，
 导致 Hermes 客户端列表同一模型出现多行（`gpt-5.6-luna` / `openai/gpt-5.6-luna` / `GPT-5.6-Luna`）。
@@ -365,8 +374,39 @@ cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch &
 下游（防止修过头把真错也一起吞掉）。**验证为 RED → GREEN**：还原补丁时两条用例均失败（Uncaught Exception），
 打上补丁后通过；`npm run test` 从 226 → **228 passed**，`typecheck` / `lint` / `build` 全绿。
 
-**白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **34 个正式模型 ID** + 主动放行的
-`deepseek/deepseek-v4.1-flash`，共 **35 个**（放行理由与旧名路由关系见 §6）。
+**④ 冷却在请求成功后未清除**（2026-09-14）：上游 `credential-router.ts` 的 `recordSuccess()` 只释放并发计数，
+**不清冷却**。而 `recordFailure()` 遇 429 / 无状态码 / 5xx 会给凭证打上 `cooldownMs`（默认 60s）冷却。
+两者叠加出的故障链：单凭证场景下，请求 A 内部先撞上游 5xx（打上 60s 冷却）→ A 内部重试成功、**对外返回 200**
+→ 但冷却仍在，于是接下来整个冷却窗口内所有请求都在 `select()` 处筛不出候选，
+被**秒拒 503** `No available CommandCode credentials for model ...`（响应时间仅 18~27ms，根本没发上游请求）。
+实测本机 2026-09-14 09:10:17/19/24 连续三个 503 即此（Hermes 自动重试 3 次全撞上，之后自愈）。
+
+特征（据此与「上游真故障」区分）：**前一个请求成功返回后，紧接着的请求立刻 503，且耗时极短（几十毫秒）**；
+`/admin/commandcode/credentials` 看凭证 `disabledForMs` 非 0、`disabledReason` 为 `cooldown`。
+
+补法 = `recordSuccess()` 清掉**自己造成的**冷却，只清 `cooldown`（`auth` / `billing` / `expired` 反映凭证真实问题，
+一次成功不足以推翻）：
+
+```diff
+ public recordSuccess(id: string): void {
+-    this.release(id);
++    const state = this.stateById(id);
++    if (state && state.disabledReason === "cooldown") {
++      state.disabledUntil = 0;
++      state.disabledReason = undefined;
++    }
++    this.release(id);
+ }
+```
+
+回归测试两条：`tests/credential-router.test.ts` ① 请求最终成功后不得残留冷却；② 成功的那次请求**只**清自己的冷却，
+不能替别的凭证「洗白」。另有 `tests/provider.test.ts` 一条端到端用例（撞 500 → 重试成功 → 紧接着的请求必须仍可选中）。
+**验证为 RED → GREEN**：还原补丁时该组用例精确复现线上报错（`NoAvailableCommandCodeCredentialError` at
+`credential-router.ts:395`），打上后 `npm run test` 从 228 → **231 passed**，`typecheck` / `lint` / `build` 全绿；
+生产实例重启后实测连续 5 次请求全部 200。
+
+**白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **31 个正式模型 ID** + 主动放行的
+`deepseek/deepseek-v4.1-flash`，共 **32 个**（旧 deepseek v4-flash / -fast / -vision-exp 三 ID 已由官方路由到 V4.1-Flash 而移除，见 §6）。
 Claude 系列（`claude-*`）不在 GOAT 内，Provider API 通道实测 403；目录里其余未列模型（如
 Kimi-K2.6/GLM-5.1/MiniMax-M2.7/Qwen3.7-Flash 等）也已随收紧移除。想加回某个模型：编辑 .env 该行追加 ID 后重启。
 
@@ -414,6 +454,15 @@ cron 的 model 是 user-owned 字段，`cronjob` 工具改不了，须用 `herme
 3. **改 `default_model` 只影响新建会话**：Hermes 会话在创建时把模型写进 `sessions.model`，已存在的会话
    （含改名当时正在进行的对话）继续用旧模型，**改配置不会追溯**——这是当时"改了配置但对话里还是
    `deepseek-v4-flash`"的原因，不是配置没生效。要换已有会话：客户端模型选择器里切，或新开会话。
+
+**白名单瘦身：移除旧 v4-flash 三个 ID（2026-09-11）**：用户反馈 CommandCode 模型选择器"还是显示 v4 flash"。
+根因：`COMMANDCODE_ALLOWED_MODELS` 里除钉死版 `deepseek/deepseek-v4.1-flash` 外，还留着旧的
+`deepseek/deepseek-v4-flash`（滚动别名 "(latest)"）、`-flash-fast`、`-flash-vision-exp` 三个 ID，选择器把它们
+都列出来（显示为 "V4 Flash" 及变体）。三者现均由官方路由到 V4.1-Flash（-vision-exp 上游已无 provider），
+功能上与 v4.1-flash 重叠，故从白名单移除：35 → **32**。改动面：`~/commandcode-bridge/.env`（已备份）、
+本手册（§2 / §5.1 / §6 / §8）、`config/env.example`、`platforms/macos/env.macos.example`、`platforms/pc/env.windows.example`。
+生效：`launchctl kickstart -k` → `/health` 的 models 变 32 个、deepseek 仅剩 `v4-pro` + `v4.1-flash`。
+代价：失去"滚动别名自动跟随最新 Flash"的选项（恢复方法见 §6 本机口径）。
 
 ## 附：macOS launchd 模板（com.commandcode.bridge.plist）
 
