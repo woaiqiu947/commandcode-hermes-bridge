@@ -15,6 +15,11 @@
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
 - 日志：`~/commandcode-bridge/bridge.stdout.log` / `bridge.stderr.log`
 - Hermes provider 注册名：`custom:commandcode`（`providers.commandcode.api = http://127.0.0.1:9992/v1`）
+- ⚠️ `~/commandcode-bridge/SETUP-NEW-MACHINE.md` 是**仓库手册的本地镜像副本**（非上游文件，未被 bridge 仓库跟踪）。
+  用途：在现场改 bridge 时手边就有一份手册，不必切目录。**改动仓库版后必须同步此副本**（`cp docs/SETUP-NEW-MACHINE.md ~/commandcode-bridge/`），
+  否则它会悄悄过期（2026-09-14 曾落后 56 行，仍写着旧的「35 个模型 / 两个补丁」）。
+  该副本已在 bridge 的 `.prettierignore` 里排除——它是本地定制文档、与仓库版保持逐字节一致，**不应被 Prettier 重排**，
+  否则 `npm run verify` 的 `format:check` 会卡在这里（这是 2026-09-14 之前 verify 一直跑不绿的原因）。
 
 ## 维护记录
 
@@ -27,3 +32,5 @@
 - 2026-09-11（白名单瘦身：移除旧 v4-flash 三 ID）：用户反馈 CommandCode 选择器"还是显示 v4 flash"。根因：白名单里除钉死版 `deepseek/deepseek-v4.1-flash` 还留着旧的 `deepseek/deepseek-v4-flash`（滚动别名 "(latest)"）、`-flash-fast`、`-flash-vision-exp` 三个 ID，选择器把它们都列出来。三者现均由官方路由到 V4.1-Flash（-vision-exp 上游已无 provider），功能重叠，故移除：35 → **32**。改动：`~/commandcode-bridge/.env`（已备份）+ 手册 + `config/env.example` + 本目录 `env.macos.example` + `platforms/pc/env.windows.example`。生效：`launchctl kickstart -k` → `/health` 32 个、deepseek 仅剩 `v4-pro` + `v4.1-flash`。代价：失去滚动别名"自动跟随最新 Flash"的选项。
 - 2026-09-11（连接排查资产）：新增 `docs/TROUBLESHOOTING-CONNECTION.md`（“连不上 / 模型不能用”的 5 层分层定位，Windows 为主 + macOS 附录）与一键自检脚本 `scripts/doctor.sh`（macOS/Linux）、`platforms/pc/doctor.ps1`（Windows）。起因：另一台机器报 connection error，据此逐层整理。`doctor.sh` 已在本机实测跑通（五层全绿）。
 - 2026-09-14（patch 0003：请求成功后残留冷却致连发 503）：用户报 provider=commandcode / model=`deepseek/deepseek-v4.1-flash` 返回 503「No available CommandCode credentials for model ...」。根因**不在配置**（白名单、默认模型、`enabled`、额度、凭证状态全部正常，实测请求 200）：`credential-router.ts` 的 `recordSuccess()` 只释放并发计数、**不清冷却**，而 `recordFailure()` 遇 429/无状态码/5xx 会打 60s 冷却——于是「请求 A 内部撞 5xx 打上冷却 → 内部重试成功对外 200 → 冷却残留 → 接下来 60s 内所有请求被 `select()` 秒拒 503」。本机 09:10:17/19/24 三个 503 响应耗时仅 18~27ms（未发上游请求），与其后自愈的现象吻合。修复导出为 `patches/0003-cooldown-cleared-on-success.patch`（`src/credential-router.ts` + 3 条回归用例，含 1 条端到端），RED→GREEN 验证通过，`npm run test` 228 → **231 passed**；生产实例重启后连发 5 次请求全部 200。手册 §8 ④ 记录了症状特征（**前一请求成功返回后、紧接着的请求立刻 503 且耗时极短**）与排查入口 `/admin/commandcode/credentials`。
+- 2026-09-14（本地树卫生：mirror 同步 + prettierignore）：① 同步 `SETUP-NEW-MACHINE.md` 镜像副本到仓库最新版（此前落后 56 行）；② bridge 的 `.prettierignore` 末尾加一行 `SETUP-NEW-MACHINE.md`——该 md 是本地定制文档、须与仓库逐字节一致，**不能被 Prettier 重排**；③ 结果：`npm run verify` 首次**全程退出码 0**（typecheck / lint / format:check / 231 tests / build 全绿）。
+  ⚠️ 注意 `.prettierignore` **是上游跟踪文件**（非本地文件），这一行改动属于本地定制，上游 `git pull` 若冲突需重打；它与 `patches/` 三个补丁一起构成 bridge 工作区的全部本地改动（`git status` 看到的 6 个 src/tests 改动 = 三个补丁的内容，两处新增 = 本 md 镜像与 prettierignore）。

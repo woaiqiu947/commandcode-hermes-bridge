@@ -310,6 +310,14 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch && npm run build
 ```
 
+另有**几处不进补丁的本地改动**（上游树里没有或以本地状态存在，`git pull` 一般不会冲突）：
+
+- `~/commandcode-bridge/.env`（本地配置，含 key，**永不入库**）；
+- `~/commandcode-bridge/SETUP-NEW-MACHINE.md`（本手册的镜像副本，便于现场查阅）——**改了本手册要记得 `cp docs/SETUP-NEW-MACHINE.md ~/commandcode-bridge/` 同步**；
+- `~/commandcode-bridge/.prettierignore` 末尾的一行 `SETUP-NEW-MACHINE.md`（⚠️ 这个文件**是上游跟踪文件**，改动属于本地定制）：
+  镜像副本须与仓库版逐字节一致，不能被 Prettier 重排，故排除。**没这一行时 `npm run verify` 会卡在 `format:check`**
+  （曾长期如此，2026-09-14 加行后首次全程退出码 0：typecheck / lint / format:check / 231 tests / build 全绿）。
+
 **① 去别名开关**（2026-09-02）：上游 `publicModelList()` 把 `MODEL_ALIASES` 别名混进 `/v1/models` 输出，
 导致 Hermes 客户端列表同一模型出现多行（`gpt-5.6-luna` / `openai/gpt-5.6-luna` / `GPT-5.6-Luna`）。
 本机加了一个默认关闭的开关，开启后只返回正式 ID；请求侧别名解析不受影响：
