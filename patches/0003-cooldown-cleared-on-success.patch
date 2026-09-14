@@ -1,0 +1,127 @@
+diff --git a/src/credential-router.ts b/src/credential-router.ts
+index 05678b8..3d6a3d1 100644
+--- a/src/credential-router.ts
++++ b/src/credential-router.ts
+@@ -426,6 +426,16 @@ export class CommandCodeCredentialRouter {
+   }
+ 
+   public recordSuccess(id: string): void {
++    const state = this.stateById(id);
++    // 本地定制（2026-09-14）：请求最终成功时，清掉它自己在重试途中打下的冷却。
++    // recordFailure 遇 429/无状态码/5xx 会打 cooldownMs 冷却；而同一请求内部重试
++    // 成功后只走 recordSuccess——冷却若残留，接下来整个冷却窗口（默认 60s）内所有
++    // 请求都会在 select() 处筛出空候选并被秒拒 503（09-14 09:10 线上故障即此）。
++    // 只清 "cooldown"：auth/billing/expired 反映凭证的真实问题，一次成功不足以推翻。
++    if (state && state.disabledReason === "cooldown") {
++      state.disabledUntil = 0;
++      state.disabledReason = undefined;
++    }
+     this.release(id);
+   }
+ 
+diff --git a/tests/credential-router.test.ts b/tests/credential-router.test.ts
+index d7dba30..25c4f7e 100644
+--- a/tests/credential-router.test.ts
++++ b/tests/credential-router.test.ts
+@@ -334,6 +334,48 @@ describe("CommandCode credential routing", () => {
+     });
+   });
+ 
++  it("clears a self-inflicted cooldown once the request eventually succeeds", async () => {
++    // 本地定制（2026-09-14）：复现线上 503。
++    // 真实链路：一次请求内部先撞上游 5xx（recordFailure 打了 60s cooldown），
++    // 随后内部重试成功、对外返回 200（recordSuccess）。若 recordSuccess 不清掉这层
++    // cooldown，接下来 60 秒内所有请求都会在 select() 处筛出空候选，被秒拒 503
++    // ——09-14 09:10:17/19/24 那三个 503 就是这么来的。
++    const router = new CommandCodeCredentialRouter({
++      credentials: [credential("solo")],
++      policy: "round_robin",
++      billingRefreshMs: 60_000,
++      cooldownMs: 60_000,
++      now: () => now,
++    });
++
++    await router.select({ model: "deepseek/deepseek-v4.1-flash" });
++    router.recordFailure("solo", { statusCode: 502 }); // 内部第一次尝试失败
++    router.recordSuccess("solo"); // 内部重试成功，请求对外返回 200
++
++    await expect(router.select({ model: "deepseek/deepseek-v4.1-flash" })).resolves.toMatchObject({
++      id: "solo",
++    });
++  });
++
++  it("keeps a cooldown recorded by a different request than the one that succeeded", async () => {
++    // 成功的那次请求只应清掉自己造成的 cooldown；不能替别的请求「洗白」。
++    const router = new CommandCodeCredentialRouter({
++      credentials: [credential("a"), credential("b")],
++      policy: "round_robin",
++      billingRefreshMs: 60_000,
++      cooldownMs: 60_000,
++      now: () => now,
++    });
++
++    await router.select({ model: "deepseek/deepseek-v4-pro" });
++    router.recordFailure("a", { statusCode: 429 }); // a 被冷却
++    router.recordSuccess("b"); // b 成功，不应解冻 a
++
++    await expect(router.select({ model: "deepseek/deepseek-v4-pro" })).resolves.toMatchObject({
++      id: "b",
++    });
++  });
++
+   it("does not select manually disabled credentials", async () => {
+     const router = new CommandCodeCredentialRouter({
+       credentials: [{ ...credential("off"), enabled: false }, credential("on")],
+diff --git a/tests/provider.test.ts b/tests/provider.test.ts
+index 911da2d..9b533fb 100644
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -446,6 +446,48 @@ describe("provider chat client", () => {
+     expect(postCount).toBe(3);
+   });
+ 
++  it("does not block later requests after a request recovers from a transient failure", async () => {
++    // 本地定制（2026-09-14）端到端回归：这正是线上 503 的完整链路。
++    // 单凭证场景下，请求 A 内部先撞 500（router 给凭证打上 cooldown），随后内部重试
++    // 成功、对外返回 200。修复前 recordSuccess 不清冷却，导致紧随其后的请求 B 在
++    // select() 处筛不出候选、被秒拒 503 "No available CommandCode credentials ..."。
++    let postCount = 0;
++    const fetchMock = vi.fn<typeof fetch>(async (input) => {
++      const billing = billingResponse(String(input));
++      if (billing) return billing;
++      postCount += 1;
++      if (postCount === 1) {
++        return Response.json(
++          { error: { message: "server error", type: "server_error" } },
++          { status: 500 },
++        );
++      }
++      return Response.json({ id: `chatcmpl_${postCount}`, choices: [] }, { status: 200 });
++    });
++    vi.stubGlobal("fetch", fetchMock);
++
++    const client = new CommandCodeProviderClient(providerConfig());
++
++    // 请求 A：第一次尝试 500，第二次成功；对外是成功。
++    const first = await client.chat(
++      buildProviderChatRequestBody(
++        { model: "default", messages: [{ role: "user", content: "hi" }] },
++        "deepseek/deepseek-v4-pro",
++      ),
++    );
++    expect(first.ok).toBe(true);
++
++    // 请求 B：紧接其后，必须仍能选中同一凭证，而不是被 A 残留的 cooldown 拒掉。
++    const second = await client.chat(
++      buildProviderChatRequestBody(
++        { model: "default", messages: [{ role: "user", content: "again" }] },
++        "deepseek/deepseek-v4-pro",
++      ),
++    );
++    expect(second.ok).toBe(true);
++    await expect(second.json()).resolves.toMatchObject({ id: "chatcmpl_3" });
++  });
++
+   it("throws a configuration error when no credentials are configured", async () => {
+     const client = new CommandCodeProviderClient(providerConfig({ commandCodeCredentials: [] }));
+     await expect(

@@ -13,7 +13,7 @@
 
 ## 路径约定（Windows）
 
-- bridge 源码：`C:\Users\<user>\commandcode-bridge`（上游 clone，本地打了两处补丁，见仓库 `patches/`；`run-with-guard.mjs` 与 `.env` 为本地未跟踪新增）
+- bridge 源码：`C:\Users\<user>\commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 三个补丁，见仓库 `patches/`；`run-with-guard.mjs` 与 `.env` 为本地未跟踪新增）
 - Node：`C:\Users\<user>\AppData\Local\hermes\node\node.exe`（Hermes 自带 node，版本满足 bridge 要求）
 - 自启：任务计划程序 `CommandCodeBridgeWatchdog`（每分钟，pythonw 无窗口）
 - watchdog 脚本：`C:\Users\<user>\AppData\Local\hermes\scripts\watchdog_commandcode_bridge.py`
@@ -35,7 +35,7 @@
 - `patches/0001-canonical-models-only.patch` 两处本地定制（env 白名单唯一权威 + `/v1/models` 去别名只列正式 ID）**已在本地 `src/config.ts` / `src/types.ts` 应用**（2026-09-02）。
 - `patches/0002-stream-abort-error-handling.patch`（2026-09-11，**mac 侧新增**）：修「客户端中断流式请求 → 未捕获 `AbortError` → bridge 进程退出」。**PC 若还没打，仍靠 `run-with-guard.mjs` 吞错误兜着**（见下表"启动方式"）——功能上不阻塞，但打上后可去掉那层 guard 兜底逻辑。
 - 验证方法：`git apply --check patches/0001-canonical-models-only.patch` 报 `patch does not apply` = 已打；`src/config.ts` 内有 `// 本地定制（2026-09-02）` 注释；`src/provider-chat.ts` 内有 `source.on("error"` = 0002 已打。
-- 上游 `git pull` 后需重打：`git apply patches/0001-canonical-models-only.patch patches/0002-stream-abort-error-handling.patch`，然后 `npm run build`（若上游已合入则跳过）。
+- 上游 `git pull` 后需重打：`git apply patches/0001-canonical-models-only.patch patches/0002-stream-abort-error-handling.patch patches/0003-cooldown-cleared-on-success.patch`，然后 `npm run build`（若上游已合入则跳过）。
 
 ## 与 macOS 的差异
 
@@ -54,3 +54,4 @@
 - 2026-09-04：watchdog + 任务计划自启跑通（进程拉起由 `run-with-guard.mjs` 守卫）。
 - 2026-09-08：资产整理进仓库，本目录由占位改为实际内容。
 - 2026-09-11（**待 PC 同步，mac 侧已改**）：① 白名单 34 → **35**，加 `deepseek/deepseek-v4.1-flash`；② 默认模型改 `deepseek/deepseek-v4.1-flash`（原 `deepseek/deepseek-v4-pro`）。命名对照与判定证据见手册 §6——**注意 CommandCode 与 DeepSeek 官方渠道的 V4.1 名字不同**（bridge 侧用 `deepseek/deepseek-v4.1-flash`，官方 API 用 `deepseek-flash`）。③ 可选：打 `patches/0002` 后去掉 `run-with-guard.mjs` 的 AbortError 兜底。
+- 2026-09-11（白名单瘦身，**待 PC 同步，mac 侧已改**）：白名单移除旧 `deepseek/deepseek-v4-flash`（滚动别名 "(latest)"）、`-flash-fast`、`-flash-vision-exp` 三 ID（均路由到 V4.1-Flash，-vision-exp 上游无 provider），35 → **32**。PC 的 live `.env` 需同步删除这三个 ID 并重启（模板 `env.windows.example` 已更新为 32 个）。

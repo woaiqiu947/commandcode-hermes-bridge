@@ -10,7 +10,7 @@
 |---|---|---|
 | 本体 | 开源 CLI，Hermes 可直接当子进程调用 | 闭源，只有官方 Studio 客户端 + 一把账号级 API key |
 | Hermes 接入方式 | `opencode run '...'` 子进程（有 skill 教程） | 只能走 OpenAI 兼容 provider 通道 |
-| 凭据形态 | 用户自己的 API key | **订阅额度**（如 GOAT 34 模型），单把共享 key |
+| 凭据形态 | 用户自己的 API key | **订阅额度**（如 GOAT 31 模型），单把共享 key |
 | Hermes "支持"的本质 | **skill + 子进程编排**，不是 provider 注册表条目 | **`custom:<name>` provider + 本地 bridge** |
 
 关键认知：Hermes 对 opencode 的"支持"从来不是第一类公民式的 provider——它是把一个**开源的、可编程的 agent CLI** 当工人派活（`opencode run`）。而 commandcode 没有这样的 CLI 给你调；它只给你一把 key 和一个 OpenAI 兼容端点。这两者的接入姿势天然不同。
@@ -23,7 +23,7 @@ Hermes 的 provider 注册表（`auth.py` 的 `PROVIDER_REGISTRY`）里有很多
    CommandCode 没有公开的、可自助注册的 API 平台。用户拿到的不是"自己的 key + 官方 API 文档"，而是"一份订阅额度 + 官方客户端"。把某个订阅产品的私有端点写死进 agent 核心，违背 Hermes 的设计原则——核心只做窄腰，第三方产品不集成进核心树。
 
 2. **模型列表是动态的、随订阅而变。**
-   上游目录实际有 60+ 模型，但你的套餐只覆盖其中一部分（GOAT = 34 个）。Hermes 内置 provider 的模型列表是静态的（或从 models.dev 拉），commandcode 的可用列表**因人而异**，没法写死在核心。必须靠 `GET /v1/models` 动态发现——这正是 bridge 里那两处本地补丁（只列正式 ID、白名单唯一权威）存在的原因。
+   上游目录实际有 60+ 模型，但你的套餐只覆盖其中一部分（GOAT = 31 个）。Hermes 内置 provider 的模型列表是静态的（或从 models.dev 拉），commandcode 的可用列表**因人而异**，没法写死在核心。必须靠 `GET /v1/models` 动态发现——这正是 bridge 里那两处本地补丁（只列正式 ID、白名单唯一权威）存在的原因。
 
 3. **凭据形态是"订阅路由"而非"单 key"。**
    `provider.ts` 里有完整的 `credential-router`、cooldown、retry-backoff、余额告警——这是把一把共享 key 当多路负载均衡用。这是订阅类产品的专属逻辑，不属于 agent 核心要内置的东西。
