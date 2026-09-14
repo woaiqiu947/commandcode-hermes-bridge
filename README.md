@@ -21,6 +21,7 @@ CommandCode 与 Hermes Agent 的本地桥接服务、安装配置、模型目录
 ## 文档 / Documentation
 
 - [安装与配置手册 / Setup Guide](docs/SETUP-NEW-MACHINE.md)
+- [连接错误排查手册 / Connection Troubleshooting](docs/TROUBLESHOOTING-CONNECTION.md)
 - [为什么需要 bridge / Why a bridge?](docs/WHY-BRIDGE.md)
 
 ## 仓库结构（操作包 / Runbook）
@@ -29,20 +30,27 @@ CommandCode 与 Hermes Agent 的本地桥接服务、安装配置、模型目录
 
 ```
 commandcode-hermes-bridge/
-├── docs/                  # 手册：SETUP（怎么装）+ WHY（为什么）
+├── docs/                  # 手册：SETUP（怎么装）+ TROUBLESHOOTING（连不上/模型不能用）+ WHY
 ├── config/
 │   └── env.example        # 上游 .env 模板（平台无关）
 ├── patches/
-│   └── 0001-canonical-models-only.patch   # 本地补丁：/v1/models 只列正式 ID + 白名单唯一权威
+│   ├── 0001-canonical-models-only.patch        # /v1/models 只列正式 ID + 白名单唯一权威
+│   └── 0002-stream-abort-error-handling.patch  # 客户端中断流式请求不再崩 bridge 进程
 ├── scripts/
-│   └── probe_bridge_models.py             # 单飞探测模型可用性（跨平台）
+│   ├── probe_bridge_models.py   # 单飞探测模型可用性（跨平台）
+│   └── doctor.sh                # 一键自检（macOS / Linux）
 └── platforms/             # ★ 按平台分区的自产资产
     ├── macos/             # ← mac 的 Hermes 维护
     │   ├── README.md
     │   ├── com.commandcode.bridge.plist   # launchd 自启
     │   └── env.macos.example              # mac 实际 .env 脱敏模板
-    └── pc/                # ← pc 的 Hermes 到了再填
-        └── README.md      # 占位说明
+    └── pc/                # ← PC 的 Hermes 维护（Windows）
+        ├── README.md
+        ├── doctor.ps1                     # 一键自检（Windows）
+        ├── env.windows.example            # PC 实际 .env 脱敏模板
+        ├── CommandCodeBridgeWatchdog.xml  # 任务计划自启
+        ├── watchdog_commandcode_bridge.py # 健康检查 + 自动拉起
+        └── run-with-guard.mjs             # 启动守卫（吞上游 AbortError）
 ```
 
 ## 仓库用途
