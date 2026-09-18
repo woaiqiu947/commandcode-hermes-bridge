@@ -38,12 +38,16 @@ powershell -ExecutionPolicy Bypass -File platforms\pc\doctor.ps1
 bash scripts/doctor.sh
 ```
 
-脚本会把下面第 2 节的五层检查**全部跑一遍并给出结论**（哪一层断了一目了然）。
+脚本会把下面第 2 节的**七层**检查**全部跑一遍并给出结论**（哪一层断了一目了然）。
 如果想手动逐条查，照第 2 节做即可。
+
+> 2026-09-18 起增加到七层：新增 **⑥ 进程是否跑着最新构建**（"修了还是坏"的常见原因）
+> 与 **⑦ 传输上限 / 旧 ID 兜底开关**（413 与 `model_not_allowed` 两大高频故障）。
+> Windows 的 `platforms/pc/doctor.ps1` 目前仍是五层，待 PC 侧同步。
 
 ---
 
-## 2. 五层定位法（手动版）
+## 2. 七层定位法（手动版）
 
 > 原则：**从下往上查，哪一层先断，问题就在那一层。**
 
@@ -169,6 +173,56 @@ COMMANDCODE_CLI_VERSION=1.53.0
 
 ---
 
+### 第 ⑥ 层：跑着的进程，是不是最新的那份构建？（2026-09-18 新增）
+
+**这一层的价值：它专门解释“我明明修了 / 明明照文档改了，问题照旧”。**
+
+launchd（macOS）与任务计划（Windows）的 `KeepAlive`/看门狗**只在进程退出时才重启**。
+`npm run build` 或改 `.env` 都**不会**触发重启 —— 于是磁盘上是新代码，内存里跑的是旧代码。
+本机 2026-09-14 就是这样：`patches/0003` 已构建进 `dist/`，但 09-14 09:53 起的进程一直用到
+09-18，期间 503 照旧复现，看上去像“补丁没用”。
+
+```bash
+# macOS：进程启动时间 vs dist 构建时间（dist 更新 → 说明改动没生效）
+ls -lT ~/commandcode-bridge/dist/*.js | tail -3
+ps -o pid,lstart,etime -p "$(lsof -ti :9992)"
+launchctl print gui/$(id -u)/com.commandcode.bridge | grep -E "state|pid|runs"
+```
+
+**判定**：`dist` 里任一文件的 mtime **晚于**进程启动时间 → 就是这层。
+**修法**：重载进程，别只 build。
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge   # macOS
+# Windows：重启任务计划 / 结束 node 进程后让看门狗拉起
+```
+
+`scripts/doctor.sh` 的 ⑥ 会自动比对这两者并在不一致时报 `✗`。
+
+---
+
+### 第 ⑦ 层：传输上限与旧模型 ID 兜底（2026-09-18 新增）
+
+两个**与配置是否“正确”无关**的高频故障，看 `.env` 两个键即可：
+
+| 键 | 建议值 | 不设/设小会怎样 |
+|---|---|---|
+| `REQUEST_BODY_LIMIT_BYTES` | `16777216`（16 MiB） | 上游默认 **1 MiB**。长会话（历史累积）会被 Fastify 直接拒：`413 FST_ERR_CTP_BODY_TOO_LARGE`，Hermes 侧显示 `413 payload too large. Cannot compress further.`，用户以为“bridge 坏了”。模型上下文是 1M token（约 2~4 MB 请求体），不该由传输层先拒。 |
+| `COMMANDCODE_LEGACY_MODEL_ALIAS` | `true` | 不开时，任何**还记得旧模型 ID** 的客户端会拿到 `400 Model "deepseek/deepseek-v4-flash" is not allowed`。旧 ID 的来源不是配置错误，而是客户端侧持久化：桌面端记住上次选的模型、**会话在创建时把模型名钉死**（旧会话改不回来）、另一台机器、cron 任务。开了之后旧 ID 在**请求侧**归一化到正式 ID，且不会重新出现在 `/v1/models` 里。 |
+
+```bash
+grep -E '^REQUEST_BODY_LIMIT_BYTES=|^COMMANDCODE_LEGACY_MODEL_ALIAS=' ~/commandcode-bridge/.env
+```
+
+**判定**：报 413 → 看上表第一行；报 `... is not allowed` → 看第二行。
+**修法**：改 `.env` 后**必须重载进程**（见 ⑥），否则不生效。
+
+> 取舍：`COMMANDCODE_LEGACY_MODEL_ALIAS=true` 时，若某台机器仍把旧 ID 放进
+> `COMMANDCODE_ALLOWED_MODELS`，它的请求也会被改道到正式 ID。这正是预期（旧 ID 已退役），
+> 但属于有意的行为改变，所以该开关**默认关闭、按机器显式打开**（上游代码零影响）。
+
+---
+
 ## 3. 症状 → 病因速查表
 
 | 症状 | 最可能原因 | 看哪一节 |
@@ -179,9 +233,13 @@ COMMANDCODE_CLI_VERSION=1.53.0
 | 模型列表**为空** | bridge 没起(①)；或 Hermes 端 `models` 被存成字符串 | ① / 手册 §5.1 |
 | 模型列表**重复**出现同一模型 | 上游把别名混入 `/v1/models` | 手册 §8 补丁 0001 |
 | 某些模型报 `model_not_found` / 403 | 不在白名单 | 手册 §7 |
+| 长会话突然报 **413 `Payload Too Large`** | `.env` 的 `REQUEST_BODY_LIMIT_BYTES` 太小（默认 1 MiB） | ⑦ |
+| 选某个模型报 **400 `... is not allowed`**，但列表里明明有同类模型 | 客户端残留旧模型 ID（桌面端记住的选择 / 旧会话钉死 / 另一台机器） | ⑦ |
+| 补丁/配置**改完没效果**、老问题照旧复现 | 进程跑的仍是旧构建（build 不触发 KeepAlive 重启） | ⑥ |
 | **时好时坏**、间歇性超时 | 多机共用凭证的并发上限 | ⑤ |
 | 对话中途断开、bridge 频繁重启 | 客户端取消流式请求触发的上游 `AbortError` 缺陷 | macOS：`patches/0002`（源码层修）；Windows：`run-with-guard.mjs` 运行时守卫。详见手册 §7 / §8 |
 | 选某个模型报 *region not available* | 该模型在你所在区域不可用（如 `gpt-5.6-luna` 在大陆网络） | 换模型（如 `gpt-5.6-sol`） |
+| 计划任务整轮失败、报 *provider unresponsive / no response received* | 上游长时间零响应，Hermes 看门狗放弃；先按 ⑥⑦ 排除本机因素，再查上游/额度 | ⑥ ⑦ + `/admin/commandcode/credentials` |
 
 ---
 

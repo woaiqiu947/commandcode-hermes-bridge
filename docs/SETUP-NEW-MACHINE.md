@@ -2,9 +2,9 @@
 
 > 目标：让另一台机器上的 Hermes 也能通过本地 bridge 使用同一个 CommandCode 订阅。
 > 本手册是通用步骤，按当前已跑通的 macOS 实例整理（2026-09-02）。Windows / Linux 差异处已标注。
-> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 三个本地补丁
+> **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 四个本地补丁
 > （`0001-canonical-models-only.patch` 去别名 + 白名单唯一权威；`0002-stream-abort-error-handling.patch` 流式中断不再崩进程；
-> `0003-cooldown-cleared-on-success.patch` 请求成功后清除残留冷却，见 §8）。
+> `0003-cooldown-cleared-on-success.patch` 请求成功后清除残留冷却；`0004-legacy-model-alias.patch` 旧模型 ID 请求侧兜底，均见 §8）。
 > 全程不需要把 CommandCode Studio key 发给任何人或贴进聊天；key 只写进本机文件。
 
 ## 0. 前置条件核对
@@ -55,6 +55,15 @@ COMMANDCODE_CLI_VERSION=1.53.0
 # (6) 默认模型 —— 客户端未显式指定 model 时用它。V4.1-Flash 正式版（2026-09-11 起；旧默认 v4-pro
 #     自 2026-09-14 12:00 起也会被官方路由到 V4.1-Flash，直接写 V4.1 的 ID 更明确）
 COMMANDCODE_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash
+
+# (7) 本地补丁⑤开关：已在 (3) 里淘汰的三个旧 DeepSeek ID 在**请求侧**归一化到正式 ID。
+#     旧 ID 来自客户端持久化（桌面端记住的模型选择、创建时钉死模型的旧会话、别的机器、cron），
+#     不开这个开关它们会 400 model_not_allowed，被当成「服务又坏了」。旧 ID 不会回到 /v1/models。
+COMMANDCODE_LEGACY_MODEL_ALIAS=true
+
+# (8) 传输层上限。上游默认 1 MiB，而模型上下文是 1M token（请求体可达 2~4 MB）——
+#     不改这一行，长会话会被 413 Payload Too Large 直接拒掉。改完必须重启 bridge。
+REQUEST_BODY_LIMIT_BYTES=16777216
 ```
 
 随机串生成（无需 openssl，node 即可）：
@@ -284,7 +293,7 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 ## 7. 故障排查
 
 > **“连接不上 / 模型不能用”这类问题**有一份专门的**分层定位手册**：
-> **[TROUBLESHOOTING-CONNECTION.md](TROUBLESHOOTING-CONNECTION.md)** —— 按 5 层从下往上查，
+> **[TROUBLESHOOTING-CONNECTION.md](TROUBLESHOOTING-CONNECTION.md)** —— 按 7 层从下往上查，
 > 含 **Windows PowerShell** 与 **macOS** 的一键自检脚本（`platforms/pc/doctor.ps1` / `scripts/doctor.sh`）。
 > 下表演是速查表，覆盖面更广；连接类问题优先用那份分层手册。
 
@@ -293,6 +302,9 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 | `hermes chat` 报连不上 127.0.0.1:9992 | bridge 没起：macOS `launchctl print gui/$(id -u)/com.commandcode.bridge`；Windows 看 Startup 文件夹的 cmd 是否被执行（双击试跑） |
 | health 里 `commandcode_api_key_configured: false` | `.env` 的 `COMMANDCODE_API_KEY` 没填/没保存，改完重启 bridge |
 | 模型请求 403 / model_not_found | 该模型不在白名单；改 `COMMANDCODE_ALLOWED_MODELS` 后重启 |
+| 长会话突然 **413 Payload Too Large**（Hermes 显示 `413 payload too large. Cannot compress further.`） | `.env` 的 `REQUEST_BODY_LIMIT_BYTES` 太小（上游默认 1 MiB）；改 `16777216` 并**重启 bridge**。见 §8 ⑥ |
+| 报 **400 `Model "deepseek/deepseek-v4-flash" is not allowed`**，但白名单看着没问题 | 客户端残留旧模型 ID（桌面端记住的选择 / 创建时钉死模型的旧会话 / 别的机器）：开 `COMMANDCODE_LEGACY_MODEL_ALIAS=true` + 重打 `patches/0004`，见 §8 ⑤ |
+| **补丁/配置改完没效果**、老问题原样复现 | 进程跑的仍是旧构建：`npm run build` 不会触发 KeepAlive 重启。比对 `ls -lT dist/*.js` 与 `ps -o lstart -p $(lsof -ti :9992)`，然后重载服务。见 TROUBLESHOOTING 第 ⑥ 层 |
 | 返回上游余额/权限错误 | 安装本身健康，是订阅档位/额度问题；看日志：macOS `tail -50 ~/commandcode-bridge/bridge.stdout.log`，Windows 在启动窗口里直接可见 |
 | 想更新 bridge | `git -C ~/commandcode-bridge pull && cd ~/commandcode-bridge && npm install --include=dev && npm run build`，再重启服务 |
 | 改了 `default_model` 但当前对话/新会话还是旧模型 | 会话在**创建时**钉死模型（`sessions.model`），改配置**不追溯**已存在的会话。新开会话，或在客户端模型选择器里切。查证：`sqlite3 ~/.hermes/state.db "select id, model from sessions order by started_at desc limit 5;"` |
@@ -301,13 +313,14 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 
 ## 8. 本地定制补丁（⚠️ git pull 升级后需重打）
 
-对应仓库 `patches/` 三个文件：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）、
+对应仓库 `patches/` **四个文件**：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）、
 **`0002-stream-abort-error-handling.patch`**（③，改 `src/provider-chat.ts` + 新增 `tests/provider-chat.test.ts`）、
-**`0003-cooldown-cleared-on-success.patch`**（④，改 `src/credential-router.ts` + `tests/credential-router.test.ts` / `tests/provider.test.ts`）。
-打完 `npm run build` 并重启服务；一键重打三个：
+**`0003-cooldown-cleared-on-success.patch`**（④，改 `src/credential-router.ts` + `tests/credential-router.test.ts` / `tests/provider.test.ts`）、
+**`0004-legacy-model-alias.patch`**（⑤，改 `src/config.ts` + 新增 `tests/legacy-model-alias.test.ts`）。
+打完 `npm run build` 并**重启服务**（⚠️ 只 build 不重启 = 改动不生效，见 TROUBLESHOOTING 第 ⑥ 层）；一键重打四个：
 
 ```bash
-cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch && npm run build
+cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch patches/0004-*.patch && npm run build
 ```
 
 另有**几处不进补丁的本地改动**（上游树里没有或以本地状态存在，`git pull` 一般不会冲突）：
@@ -407,6 +420,44 @@ cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch p
 
 **白名单现状**：`COMMANDCODE_ALLOWED_MODELS` = GOAT 套餐官方额度表（PDF）的 **31 个正式模型 ID** + 主动放行的
 `deepseek/deepseek-v4.1-flash`，共 **32 个**（旧 deepseek v4-flash / -fast / -vision-exp 三 ID 已由官方路由到 V4.1-Flash 而移除，见 §6）。
+
+**⑤ 旧模型 ID 请求侧兜底**（2026-09-18）：白名单瘦身的**副作用**。上面三个旧 ID 从白名单移除后，
+**还记着旧 ID 的客户端**会拿到 `400 Model "deepseek/deepseek-v4-flash" is not allowed. Allowed models: ...`：
+来源不是配置错误，而是客户端侧持久化——桌面端记住上次选的模型、**会话在创建时把模型名钉死**
+（旧会话改不回来）、另一台机器复制来的设置、cron 任务。用户看到的现象是「服务又坏了 / 天天出问题」，
+而 bridge 侧白名单、默认模型、凭证全部正常。
+
+补法 = 在**请求侧**归一化（`MODEL_ALIASES`，即 `normalizeModelName` 走的路径），而不是把旧 ID 加回白名单
+（加回去会让它们重新出现在 `/v1/models`，模型选择列表又变脏）；同时把兜底键从 `publicModelList()` 的
+别名枚举里排除，兜底不会泄漏回列表：
+
+```diff
+ export const MODEL_ALIASES: Record<string, string> = {
+   default: DEFAULT_MODEL,
+   "commandcode/default": DEFAULT_MODEL,
+   ...modelAliasMap(),
++  // 必须在 modelAliasMap() 之后：目录里旧 ID 是「自己的别名」，否则会被写回自身
++  ...legacyModelAliases(),   // 开关 COMMANDCODE_LEGACY_MODEL_ALIAS，默认 {}
+ };
+```
+
+开关 `COMMANDCODE_LEGACY_MODEL_ALIAS`（默认 **关闭 = 上游行为零变化**）。打开后
+`deepseek/deepseek-v4-flash`（含 `-flash-fast` / `-flash-vision-exp` 及各种短写法/前缀写法共 9 种拼写）
+一律路由到 `deepseek/deepseek-v4.1-flash`。回归测试 `tests/legacy-model-alias.test.ts` 三条：
+① 关开关时旧 ID 仍被拒（上游行为不变）；② 开开关时 9 种拼写全部归一化到正式 ID；③ 旧 ID 不得借
+别名枚举回到 `/v1/models`。**RED → GREEN 验证**：实现前用例 ② 精确复现线上报错
+（`expected 'deepseek/deepseek-v4-flash' to be 'deepseek/deepseek-v4.1-flash'`），实现后 `npm run verify`
+全程退出码 0（typecheck / lint / format:check / **234 tests** / build）。
+
+⚠️ **取舍**：开关打开时，若某台机器仍把旧 ID 放进 `COMMANDCODE_ALLOWED_MODELS`，它的请求也会被改道到正式 ID。
+这正是预期（旧 ID 已退役），但属于有意的行为改变——所以默认关闭、按机器显式打开。
+⚠️ 上游若再给正式 flash 改名，`src/config.ts` 里的 `CANONICAL_FLASH_MODEL` 与 `LEGACY_MODEL_ALIASES` 要一起改。
+
+**⑥ 传输上限**（2026-09-18，`.env` 一行，非补丁）：`REQUEST_BODY_LIMIT_BYTES` 上游默认 **1 MiB**，
+而模型 `contextWindow` 是 **1M token**（请求体可达 2~4 MB）。结果是**传输层比模型更早拒请求**：
+一次累积了历史的会话直接吃 `413 FST_ERR_CTP_BODY_TOO_LARGE`，Hermes 侧表现为
+`413 payload too large. Cannot compress further.`（实测本机一个 08-04 起的老会话请求体 2.07 MB）。
+本机改为 **`16777216`（16 MiB）**：真正的上限交给模型上下文，不由传输层扮演。
 Claude 系列（`claude-*`）不在 GOAT 内，Provider API 通道实测 403；目录里其余未列模型（如
 Kimi-K2.6/GLM-5.1/MiniMax-M2.7/Qwen3.7-Flash 等）也已随收紧移除。想加回某个模型：编辑 .env 该行追加 ID 后重启。
 

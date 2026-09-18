@@ -7,11 +7,11 @@
 | 文件 | 用途 |
 |---|---|
 | `com.commandcode.bridge.plist` | launchd 自启配置（开机自动跑 bridge）。安装：复制到 `~/Library/LaunchAgents/`，改里面的用户路径，然后 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.commandcode.bridge.plist` |
-| `env.macos.example` | macOS 实际使用的 `.env` 脱敏模板（含 GOAT-31 + V4.1-Flash 共 32 个模型的白名单、本地补丁开关）。复制到 `~/commandcode-bridge/.env`，填入 `<填入你的值>` 处 |
+| `env.macos.example` | macOS 实际使用的 `.env` 脱敏模板（含 GOAT-31 + V4.1-Flash 共 32 个模型的白名单、本地补丁开关、传输上限 `REQUEST_BODY_LIMIT_BYTES=16777216`）。复制到 `~/commandcode-bridge/.env`，填入 `<填入你的值>` 处 |
 
 ## 路径约定（macOS）
 
-- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 下三个补丁文件、共四处定制）
+- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 下四个补丁文件：0001-canonical-models-only / 0002-stream-abort-error-handling / 0003-cooldown-cleared-on-success / 0004-legacy-model-alias）
 - ⚠️ **本目录描述的是"一台完备 mac"的状态，不等于每台 mac 都这样**——不同 mac 的 live 状态可能落后（补丁数量、白名单条目数、手册镜像、`.prettierignore` 都可能不同）。**核对自己这台请跑 `scripts/doctor.sh`**，不要照抄文档里的数字。已知差异见下方维护记录 2026-09-14 条。
 - 端口：以 `.env` 的 `PORT` 为准（当前各机为 `9992`；早期文档曾写 `8787`，属旧值/笔误，以 `lsof -nP -iTCP -sTCP:LISTEN` 实测为准）
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
@@ -36,3 +36,11 @@
 - 2026-09-14（patch 0003：请求成功后残留冷却致连发 503）：用户报 provider=commandcode / model=`deepseek/deepseek-v4.1-flash` 返回 503「No available CommandCode credentials for model ...」。根因**不在配置**（白名单、默认模型、`enabled`、额度、凭证状态全部正常，实测请求 200）：`credential-router.ts` 的 `recordSuccess()` 只释放并发计数、**不清冷却**，而 `recordFailure()` 遇 429/无状态码/5xx 会打 60s 冷却——于是「请求 A 内部撞 5xx 打上冷却 → 内部重试成功对外 200 → 冷却残留 → 接下来 60s 内所有请求被 `select()` 秒拒 503」。本机 09:10:17/19/24 三个 503 响应耗时仅 18~27ms（未发上游请求），与其后自愈的现象吻合。修复导出为 `patches/0003-cooldown-cleared-on-success.patch`（`src/credential-router.ts` + 3 条回归用例，含 1 条端到端），RED→GREEN 验证通过，`npm run test` 228 → **231 passed**；生产实例重启后连发 5 次请求全部 200。手册 §8 ④ 记录了症状特征（**前一请求成功返回后、紧接着的请求立刻 503 且耗时极短**）与排查入口 `/admin/commandcode/credentials`。
 - 2026-09-14（本地树卫生：mirror 同步 + prettierignore）：① 同步 `SETUP-NEW-MACHINE.md` 镜像副本到仓库最新版（此前落后 56 行）；② bridge 的 `.prettierignore` 末尾加一行 `SETUP-NEW-MACHINE.md`——该 md 是本地定制文档、须与仓库逐字节一致，**不能被 Prettier 重排**；③ 结果：`npm run verify` 首次**全程退出码 0**（typecheck / lint / format:check / 231 tests / build 全绿）。
   ⚠️ 注意 `.prettierignore` **是上游跟踪文件**（非本地文件），这一行改动属于本地定制，上游 `git pull` 若冲突需重打；它与 `patches/` 三个补丁一起构成 bridge 工作区的全部本地改动（`git status` 看到的 6 个 src/tests 改动 = 三个补丁的内容，两处新增 = 本 md 镜像与 prettierignore）。
+- 2026-09-18（用户报「CommandCode 服务又出问题了」，一轮定位出**三个独立故障**）：
+  - **① 413 Payload Too Large**（主症状）：`.env` 的 `REQUEST_BODY_LIMIT_BYTES` 仍是上游默认 **1 MiB**，而模型 `contextWindow` 是 1M token。一个 08-04 起的老会话（`20260804_135704_0ec0db`）请求体已达 **2.07 MB**（`~/.hermes/sessions/request_dump_*.json` 可查），于是每次对话都被 Fastify 直接拒：`413 FST_ERR_CTP_BODY_TOO_LARGE`，Hermes 侧报 `413 payload too large. Cannot compress further.`。18:40~18:44 五个请求全 413。**改法**：`.env` 改 `16777216`（16 MiB，已备份 `.env.bak-20260918-190211`）→ 重启。验证：2 MB 请求体不再 413（进到 JSON 解析层）、17 MB 仍 413（上限是"提高"不是"取消"）。
+  - **② 残留旧模型 ID 致 400**：白名单瘦身（09-11，35→32）后，**任何还记得旧 ID 的客户端**都拿到 `400 Model "deepseek/deepseek-v4-flash" is not allowed`。来源是客户端持久化而非配置错误——桌面端 localStorage 里存着 `deepseek-v4-flash`、**会话在创建时把模型名钉死**（今天 18:44 新建的 `20260918_184421_b5be98` 一出生就带旧 ID）。**改法**：新增 `patches/0004-legacy-model-alias.patch`（`src/config.ts` + `tests/legacy-model-alias.test.ts`，RED→GREEN：实现前用例精确复现线上报错），开关 `COMMANDCODE_LEGACY_MODEL_ALIAS=true`，把 9 种旧拼写在**请求侧**归一化到 `deepseek/deepseek-v4.1-flash`，且不回到 `/v1/models`。验证：旧 ID 实测 200 且响应 `model` 字段为正式 ID；正式 ID 回归 200；`/v1/models` 仍 32 个无旧 ID。
+  - **③ 补丁打了却没生效**（"天天出问题/修了还是坏"的真凶）：`patches/0003` 在 09-14 17:24 已构建进 `dist/`，但 launchd 里的进程是 09-14 09:53 起的——**build 不触发 KeepAlive 重启**，于是 0003 的修复从 09-14 到 09-18 一直没上线（期间 09-16 仍有 3 次 503）。**改法**：`launchctl kickstart -k` 重载；并把这一层做成自检项（`scripts/doctor.sh` 新增 ⑥「进程 vs 最新构建」，正反两向都实测：正常时报 ✓，把 dist 时间戳改到未来后报 ✗）。
+  - 自检脚本升到**七层**（新增 ⑥ 构建新鲜度、⑦ 传输上限/旧 ID 兜底开关），`doctor.sh` 本机实测七层全绿；`docs/TROUBLESHOOTING-CONNECTION.md` 补 ⑥⑦ 两节 + 症状速查表 4 行。
+  - 四个补丁的**完整性已双向验证**：干净副本上按序 `git apply` 0001→0004 全部干净、逐文件与本机工作区字节一致。⚠️ 导出 0004 时踩到的坑：直接 `git diff` 会**把前置补丁的改动一起包进来**（先用一次就是这样，193 行含 0001 的符号）——必须先构造「HEAD + 0001-0003」的临时基线 commit，再 diff（收正为 163 行、含 0001 符号 0 个）。
+  - 本轮之后 bridge 工作区的本地改动 = **四个补丁（7 个 src/tests 改动 + 1 个新增测试文件）+ 手册镜像 + `.prettierignore` 一行**；`npm run verify` 全程退出码 0（**234 tests**，较上轮 231 增 3 条）。
+  - **未解/待观察**：当日 17:10 的「每日工作日报」计划任务整轮失败（发往 bridge 的 5 次请求 **upstream 零响应**，18:26 被 Hermes 看门狗判 `provider unresponsive` 中止）；19:05 起 bridge 侧实测 200 正常，属上游侧长时段无响应，**未定位到本机因素**，需次日观察是否会复现。

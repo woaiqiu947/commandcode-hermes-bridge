@@ -1,0 +1,163 @@
+diff --git a/src/config.ts b/src/config.ts
+index bf31069..240d480 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -21,10 +21,58 @@ import type {
+ export const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+ export const FLASH_MODEL = "deepseek/deepseek-v4-flash";
+ 
++// 本地定制（2026-09-18）：白名单里"正式 flash"的 ID。旧 ID 的兜底别名全部指向它；
++// 上游若再给这个模型改名，这里和 LEGACY_MODEL_ALIASES 要一起改（运维手册已登记该点）。
++const CANONICAL_FLASH_MODEL = "deepseek/deepseek-v4.1-flash";
++
++// 本地定制（2026-09-18，开关 COMMANDCODE_LEGACY_MODEL_ALIAS，默认关闭=上游行为）。
++//
++// 为什么需要：白名单瘦身（去掉 deepseek/deepseek-v4-flash、-flash-fast、
++// -flash-vision-exp 三个已淘汰 ID）之后，凡是"还记着旧 ID"的客户端都会拿到
++//   400 Model "deepseek/deepseek-v4-flash" is not allowed. Allowed models: ...
++// 来源不是配置错误，而是客户端侧持久化：桌面端会记住上次选的模型、会话在创建时把模型名
++// 钉死（旧会话改不回来）、另一台机器复制过来的设置、cron 任务。用户看到的现象是
++// "服务又坏了 / 天天出问题"，而 bridge 本身健康。
++//
++// 做法：在**请求侧**把旧 ID 归一化到正式 ID（normalizeModelName 的路径），
++// 而不是把旧 ID 加回白名单——加回白名单会让它们重新出现在 /v1/models（模型选择列表又变脏）。
++// publicModelList() 里用 legacyModelAliasKeys() 把这些键从"别名枚举"中排除，
++// 所以兜底不会泄漏回列表。
++//
++// 取舍（要写进文档）：开关打开时，若某台机器仍把旧 ID 放在 COMMANDCODE_ALLOWED_MODELS 里，
++// 它的请求也会被改道到正式 ID —— 这正是预期（旧 ID 已退役），但属于有意的行为改变，
++// 因此默认关闭、按机器显式打开。
++const LEGACY_MODEL_ALIASES: Record<string, string> = {
++  "deepseek/deepseek-v4-flash": CANONICAL_FLASH_MODEL,
++  "deepseek-v4-flash": CANONICAL_FLASH_MODEL,
++  "commandcode/deepseek-v4-flash": CANONICAL_FLASH_MODEL,
++  "deepseek/deepseek-v4-flash-fast": CANONICAL_FLASH_MODEL,
++  "deepseek-v4-flash-fast": CANONICAL_FLASH_MODEL,
++  "commandcode/deepseek-v4-flash-fast": CANONICAL_FLASH_MODEL,
++  "deepseek/deepseek-v4-flash-vision-exp": CANONICAL_FLASH_MODEL,
++  "deepseek-v4-flash-vision-exp": CANONICAL_FLASH_MODEL,
++  "commandcode/deepseek-v4-flash-vision-exp": CANONICAL_FLASH_MODEL,
++};
++
++function legacyModelAliases(): Record<string, string> {
++  return legacyModelAliasEnabled() ? LEGACY_MODEL_ALIASES : {};
++}
++
++function legacyModelAliasEnabled(): boolean {
++  return parseBoolean(process.env.COMMANDCODE_LEGACY_MODEL_ALIAS, false);
++}
++
++export function legacyModelAliasKeys(): string[] {
++  return Object.keys(legacyModelAliases());
++}
++
+ export const MODEL_ALIASES: Record<string, string> = {
+   default: DEFAULT_MODEL,
+   "commandcode/default": DEFAULT_MODEL,
+   ...modelAliasMap(),
++  // 放在 modelAliasMap() 之后：目录里旧 ID 是"自己的别名"（aliases: [旧 ID]），
++  // 必须在展开之后再覆盖，否则会被 modelAliasMap() 写回自身。
++  ...legacyModelAliases(),
+ };
+ 
+ export interface LoadBridgeConfigOptions {
+@@ -294,7 +342,11 @@ export function publicModelList(config: BridgeConfig): string[] {
+   const aliasModels = Object.entries(MODEL_ALIASES)
+     .filter(
+       ([alias, upstream]) =>
+-        !["default", "commandcode/default"].includes(alias) && canonicalModels.includes(upstream),
++        !["default", "commandcode/default"].includes(alias) &&
++        // 本地定制（2026-09-18）：旧 ID 兜底别名只用于解析请求，绝不作为列表行出现，
++        // 否则"兜底"会把白名单删掉的旧 ID 又送回模型选择列表。
++        !legacyModelAliasKeys().includes(alias) &&
++        canonicalModels.includes(upstream),
+     )
+     .map(([alias]) => alias);
+   return uniq([
+diff --git a/tests/legacy-model-alias.test.ts b/tests/legacy-model-alias.test.ts
+new file mode 100644
+index 0000000..fb6a151
+--- /dev/null
++++ b/tests/legacy-model-alias.test.ts
+@@ -0,0 +1,81 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++// 本地定制回归测试（2026-09-18，开关 COMMANDCODE_LEGACY_MODEL_ALIAS）。
++//
++// 生产症状：白名单把 deepseek/deepseek-v4-flash、-flash-fast、-flash-vision-exp 三个旧 ID
++// 淘汰之后，任何"还记着旧 ID"的客户端都会拿到
++//   400 Model "deepseek/deepseek-v4-flash" is not allowed. Allowed models: ...
++// 来源包括：桌面端持久化的模型选择、重命名之前创建、创建时就把模型名钉死的旧会话、
++// 另一台机器、cron 任务。用户看到的现象是"服务又坏了"，而 bridge 本身一切正常。
++//
++// 期望行为：
++//   - 开关关闭（上游默认）→ 旧 ID 一律拒绝，上游行为零变化；
++//   - 开关打开 → 旧 ID 在请求侧归一化到正式 ID，但**不得**重新出现在 /v1/models 里。
++
++const CANONICAL = "deepseek/deepseek-v4.1-flash";
++const LEGACY_IDS = [
++  "deepseek/deepseek-v4-flash",
++  "deepseek-v4-flash",
++  "commandcode/deepseek-v4-flash",
++  "deepseek/deepseek-v4-flash-fast",
++  "deepseek-v4-flash-fast",
++  "commandcode/deepseek-v4-flash-fast",
++  "deepseek/deepseek-v4-flash-vision-exp",
++  "deepseek-v4-flash-vision-exp",
++  "commandcode/deepseek-v4-flash-vision-exp",
++];
++const ALLOWED = `deepseek/deepseek-v4-pro,${CANONICAL},moonshotai/Kimi-K3`;
++
++async function loadConfigModule(legacyAliasEnabled: boolean) {
++  vi.resetModules();
++  if (legacyAliasEnabled) process.env.COMMANDCODE_LEGACY_MODEL_ALIAS = "true";
++  else delete process.env.COMMANDCODE_LEGACY_MODEL_ALIAS;
++  return import("../src/config.js");
++}
++
++afterEach(() => {
++  delete process.env.COMMANDCODE_LEGACY_MODEL_ALIAS;
++});
++
++describe("legacy DeepSeek ids after the allowlist trim", () => {
++  it("keeps rejecting them when the switch is off (upstream behavior unchanged)", async () => {
++    const { loadBridgeConfig, normalizeModelName, resolveModel } = await loadConfigModule(false);
++    const config = loadBridgeConfig({
++      env: { COMMANDCODE_ALLOWED_MODELS: ALLOWED },
++      authPaths: [],
++    });
++
++    // 上游行为：短写法归一化到各自的旧 canonical ID，旧 ID 本身仍然是"不允许"。
++    expect(normalizeModelName("deepseek-v4-flash")).toBe("deepseek/deepseek-v4-flash");
++    expect(normalizeModelName("deepseek/deepseek-v4-flash")).toBe("deepseek/deepseek-v4-flash");
++    for (const id of LEGACY_IDS) {
++      expect(() => resolveModel(id, config), id).toThrow(/not allowed/i);
++    }
++  });
++
++  it("routes every legacy spelling to the canonical id when the switch is on", async () => {
++    const { loadBridgeConfig, normalizeModelName, resolveModel } = await loadConfigModule(true);
++    const config = loadBridgeConfig({
++      env: { COMMANDCODE_ALLOWED_MODELS: ALLOWED },
++      authPaths: [],
++    });
++
++    for (const id of LEGACY_IDS) {
++      expect(normalizeModelName(id), id).toBe(CANONICAL);
++      expect(resolveModel(id, config).upstreamModel, id).toBe(CANONICAL);
++    }
++  });
++
++  it("does not put the legacy ids back into the public model list", async () => {
++    const { loadBridgeConfig, publicModelList } = await loadConfigModule(true);
++    // 故意不开 canonical-only：别名兜底绝不能借"别名枚举"这条路把旧 ID 送回模型列表。
++    const config = loadBridgeConfig({
++      env: { COMMANDCODE_ALLOWED_MODELS: ALLOWED },
++      authPaths: [],
++    });
++    const list = publicModelList(config);
++
++    expect(list).toContain(CANONICAL);
++    for (const id of LEGACY_IDS) expect(list, id).not.toContain(id);
++  });
++});
