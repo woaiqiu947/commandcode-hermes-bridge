@@ -8,6 +8,8 @@
 |---|---|
 | `com.commandcode.bridge.plist` | launchd 自启配置（开机自动跑 bridge）。安装：复制到 `~/Library/LaunchAgents/`，改里面的用户路径，然后 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.commandcode.bridge.plist` |
 | `env.macos.example` | macOS 实际使用的 `.env` 脱敏模板（含 GOAT-31 + V4.1-Flash 共 32 个模型的白名单、本地补丁开关、传输上限 `REQUEST_BODY_LIMIT_BYTES=16777216`）。复制到 `~/commandcode-bridge/.env`，填入 `<填入你的值>` 处 |
+| `bridge_watchdog.sh` | chat 僵死（wedge）检测看门狗脚本：每 5 分钟主动探测 chat 路径，判定僵死自动 `kickstart` 重启。**2026-10-09 修订判据**：先看端口有无监听（无 → 进程已退出，立即拉起）；`/health` 超时但端口在监听 → 按「宿主机卡顿」只记账，连续 3 轮才兜底（不再一次超时就重启）；`/health` 正常而 chat 连续 3 次超时（每次 60s）→ 判 wedge 重启；重启后轮询 90 秒再下结论。探针 `max_tokens=128`。复制到 `~/.hermes/scripts/`（与 PC 侧 `AppData\Local\hermes\scripts\` 对称） |
+| `com.commandcode.bridge-watchdog.plist` | 看门狗的 launchd 定时任务（`StartInterval=300` + `RunAtLoad`）。复制到 `~/Library/LaunchAgents/` 后 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.commandcode.bridge-watchdog.plist` |
 
 ## 路径约定（macOS）
 
@@ -15,6 +17,7 @@
 - ⚠️ **本目录描述的是"一台完备 mac"的状态，不等于每台 mac 都这样**——不同 mac 的 live 状态可能落后（补丁数量、白名单条目数、手册镜像、`.prettierignore` 都可能不同）。**核对自己这台请跑 `scripts/doctor.sh`**，不要照抄文档里的数字。已知差异见下方维护记录 2026-09-14 条。
 - 端口：以 `.env` 的 `PORT` 为准（当前各机为 `9992`；早期文档曾写 `8787`，属旧值/笔误，以 `lsof -nP -iTCP -sTCP:LISTEN` 实测为准）
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
+- 看门狗：`~/.hermes/scripts/bridge_watchdog.sh` + `~/Library/LaunchAgents/com.commandcode.bridge-watchdog.plist`（每 5 分钟跑一次）；只在判定 wedge / 异常时写日志到 `~/commandcode-bridge/watchdog.log`，健康时静默
 - 日志：`~/commandcode-bridge/bridge.stdout.log` / `bridge.stderr.log`
 - Hermes provider 注册名：`custom:commandcode`（`providers.commandcode.api = http://127.0.0.1:9992/v1`）
 - ⚠️ `~/commandcode-bridge/SETUP-NEW-MACHINE.md` 是**仓库手册的本地镜像副本**（非上游文件，未被 bridge 仓库跟踪）。
@@ -44,3 +47,13 @@
   - 四个补丁的**完整性已双向验证**：干净副本上按序 `git apply` 0001→0004 全部干净、逐文件与本机工作区字节一致。⚠️ 导出 0004 时踩到的坑：直接 `git diff` 会**把前置补丁的改动一起包进来**（先用一次就是这样，193 行含 0001 的符号）——必须先构造「HEAD + 0001-0003」的临时基线 commit，再 diff（收正为 163 行、含 0001 符号 0 个）。
   - 本轮之后 bridge 工作区的本地改动 = **四个补丁（7 个 src/tests 改动 + 1 个新增测试文件）+ 手册镜像 + `.prettierignore` 一行**；`npm run verify` 全程退出码 0（**234 tests**，较上轮 231 增 3 条）。
   - **未解/待观察**：当日 17:10 的「每日工作日报」计划任务整轮失败（发往 bridge 的 5 次请求 **upstream 零响应**，18:26 被 Hermes 看门狗判 `provider unresponsive` 中止）；19:05 起 bridge 侧实测 200 正常，属上游侧长时段无响应，**未定位到本机因素**，需次日观察是否会复现。
+- 2026-09-30（wedge 看门狗：chat 僵死自动重启）：用户报「重启 Hermes 后 bridge 一直转圈」。定位：bridge 进程已运行 **6 天 20 小时**，`/v1/chat/completions` 出现 `incoming request` 无 `request completed`、无上游 TCP 连接、但 `/health` 与 `/v1/models` 秒回（`doctor.sh` 七层全绿）——**进程活着但 chat 路径僵死（wedge）**，与 2026-09-23 那次同模式。上游直连 curl 200 秒回，排除上游故障；`launchctl kickstart -k` 重启即愈。盲区：launchd `KeepAlive`（及 PC 侧现有 watchdog）**只在进程退出时重启**，检测不到 wedge。新增看门狗资产（脚本 + plist，判据：`/health` 通 + chat 连续两次超时 → 判 wedge → `kickstart`；503/429/400 等有响应不重启；健康静默）。双向验证：健康路径 exit 0 无日志；mock「health ok + chat 挂起」实测判定 wedge 并走完重启分支。⚠️ 脚本里 `${CODE}`/`${CODE2}` 必须 brace——bash 3.2 把全角 `）` 粘进变量名会 `unbound variable`（脚本自己踩到并修掉）。
+- 2026-10-09（用户报「看下服务是不是出问题了」→ 结论：**bridge 没坏，是看门狗连续两天误判重启**）：
+  - **实况**：七层自检全绿、chat 探测 1.5~2.7s 返回 200、bridge 进程 1.5% CPU / 13 线程——服务本身健康。但 `watchdog.log` 显示 **10-09 重启 22 次、10-08 41 次**（09-30 部署当天 50 次），每次重启 = 10 秒~几分钟不可用，并**掐断在飞行中的请求**（用户感受到的「服务有问题」就是它）。
+  - **根因在宿主机，不在 bridge**：这台 iMac **70 天未重启**，`fseventsd`（pid 29）失控——占 **12 GB 内存 + ~100% CPU**，整机 13.3 GB 只剩 **657 MB**、pageout **2098 万次**；load **22~27**（8 核）；系统还在 Maintenance Sleep / DarkWake 反复循环。系统周期性卡顿几十秒 → 探针超时 → 旧判据一律读成 wedge → kickstart。
+  - **旧看门狗四处判据缺陷**（已全部修掉）：① **判据不分层**——`/health` 是纯本地处理器（`src/server.ts` 里就是一个不碰网络的 async 对象），端口在监听却超时说明操作系统调度不上进程，属宿主机卡顿，此时重启不解决问题反而掐断请求；② **超时太紧**（`/health` 5s、chat 30s×2），而本机常态就有 **24~28 秒**的健康请求，正常抖动被当异常；③ **重启后只等 5+5=10 秒就下结论**，实测重启→listening **中位数 22 秒**（最长 932 秒）→ 每次重启都写一条「重启后 /health 仍异常，需人工介入」的假警报（10-09 的 22 条**全是假的**）；④ 探针 `max_tokens=32` 触发上游「空可见回复」→ 502（当日 105 次），既是日志噪声又白烧额度。
+  - **新判据**（见脚本头部注释）：端口无人监听 → 立即 kickstart；端口在监听 + `/health` 超时 → 只记账，连续 3 轮才兜底；`/health` 正常 + chat 连续 3 次超时（60s/次）→ 判 wedge 重启；**重启后轮询 90 秒**；探针 `max_tokens=128`。跨轮次计数落在 `~/commandcode-bridge/.watchdog_state`。
+  - **验证**：mock 五条路径全部实跑——健康→静默 0 重启 / 503 有响应→不重启 / 真 wedge→第 3 轮重启 / 宿主机卡顿→前 2 轮不重启、第 3 轮兜底 / 端口无人监听→立即拉起；测试用假 label，生产 bridge 未被触碰。已部署 `~/.hermes/scripts/bridge_watchdog.sh`（与仓库版逐字节一致，launchd 每次 fire 都重读脚本，无需重载）。
+  - **代价与取舍**：真 wedge 的自动恢复从约 6 分钟放宽到约 15 分钟（3 轮 × 60s 探测），换误判重启基本消失。依据：10-08~10-09 的 63 次重启**全是误判**，而真 wedge 一个月只出现 2 次（09-23 / 09-30）——这个交换划算。
+  - ⚠️ **宿主机这条根因未处理**（重启 fseventsd 或重启机器都需要 sudo，用户本轮只选了改看门狗）→ 只要 `fseventsd` 继续失控，卡顿依旧存在，只是不再被误当成 bridge 故障。**下次再遇「服务有问题」，先看 `uptime` / `top` 的 load 与 fseventsd，再看 bridge。**
+  - **旁证**：修订期间 17:49:15 旧版看门狗又误判了一次——当时机器 load ~15（正在跑 mock 测试），`/health` 5 秒超时 → kickstart，而 bridge 实际 50 秒后才就绪；正是本次要修的形态。

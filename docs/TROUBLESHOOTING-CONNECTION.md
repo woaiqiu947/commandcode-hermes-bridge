@@ -182,6 +182,20 @@ launchd（macOS）与任务计划（Windows）的 `KeepAlive`/看门狗**只在�
 本机 2026-09-14 就是这样：`patches/0003` 已构建进 `dist/`，但 09-14 09:53 起的进程一直用到
 09-18，期间 503 照旧复现，看上去像“补丁没用”。
 
+> 补充（2026-09-30）：`KeepAlive` 同样检测不到「进程活着但 chat 路径僵死」的 **wedge** 状态
+> （`/health` 秒回、chat 永久挂起，见速查表）。macOS 侧已加 `bridge_watchdog.sh` +
+> `com.commandcode.bridge-watchdog.plist`（每 5 分钟主动探测 chat 路径，僵死自动 `kickstart`）。
+> 注意它测的是 **chat 死活**，不是**构建新鲜度**——build 后没重启，仍要按本层 ⑥ 自查。
+>
+> 补充（2026-10-09）：**看门狗自己也会成为"服务有问题"的来源**——探针超时并不等于 bridge 僵死。
+> macOS 侧实测：宿主机卡顿时（`fseventsd` 失控占 12 GB 内存 +100% CPU，load 22~27），旧的紧判据
+> （`/health` 5s、chat 30s×2）把卡顿一路读成 wedge，10-09 一天重启 22 次、10-08 41 次，**全是误判**；
+> 每次重启反而造成 10 秒~几分钟不可用并掐断在飞行中的请求。现行判据已改为分层：**端口无人监听 →
+> 才立即拉起；端口在监听而 `/health` 超时 → 按"宿主机卡顿"记账，连续 3 轮才兜底；`/health` 正常而
+> chat 连续 3 次超时（60s/次）→ 才判 wedge**；重启后轮询 90 秒再下结论（实测重启→就绪中位数 22 秒）。
+> 因此遇到"服务有问题"时：**先量宿主机，再量 bridge** —— `uptime` / `top -l 3` 看 load 与 `fseventsd`、
+> 可用内存、开机天数；bridge 进程本身 CPU 只有 ~1% 却响应很慢，通常说明它只是受害者。
+
 ```bash
 # macOS：进程启动时间 vs dist 构建时间（dist 更新 → 说明改动没生效）
 ls -lT ~/commandcode-bridge/dist/*.js | tail -3
@@ -240,6 +254,8 @@ grep -E '^REQUEST_BODY_LIMIT_BYTES=|^COMMANDCODE_LEGACY_MODEL_ALIAS=' ~/commandc
 | 对话中途断开、bridge 频繁重启 | 客户端取消流式请求触发的上游 `AbortError` 缺陷 | macOS：`patches/0002`（源码层修）；Windows：`run-with-guard.mjs` 运行时守卫。详见手册 §7 / §8 |
 | 选某个模型报 *region not available* | 该模型在你所在区域不可用（如 `gpt-5.6-luna` 在大陆网络） | 换模型（如 `gpt-5.6-sol`） |
 | 计划任务整轮失败、报 *provider unresponsive / no response received* | 上游长时间零响应，Hermes 看门狗放弃；先按 ⑥⑦ 排除本机因素，再查上游/额度 | ⑥ ⑦ + `/admin/commandcode/credentials` |
+| 聊天**一直转圈**、无流式输出，但 `/health` 与 `/v1/models` 都正常 | bridge 进程「活着但 chat 路径僵死（wedge）」：chat 请求被接受却永不完成、无上游连接（运行数天后出现，2026-09-23 / 09-30 两次实测）。macOS 已有看门狗自动检测重启（`com.commandcode.bridge-watchdog`）；手动重启 `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge` | 看门狗 + 附录 A |
+| bridge **反复重启** / 「服务有问题」但自检七层全绿 | **宿主机卡顿被误判成 bridge 故障**：`/health` 与 chat 探测超时（本机健康请求常态就有 24~28 秒），看门狗据此重启。先量宿主机：`uptime`（load vs 核数）、`top -l 3`（`fseventsd` 失控 / `kernel_task`）、可用内存与 pageout、开机天数。bridge 进程 CPU ~1% 却响应慢 ⇒ 它是受害者 | 附录 A ⑥ 的 2026-10-09 补充 + `~/commandcode-bridge/watchdog.log` |
 
 ---
 
