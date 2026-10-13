@@ -19,7 +19,8 @@
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
 - 看门狗：`~/.hermes/scripts/bridge_watchdog.sh` + `~/Library/LaunchAgents/com.commandcode.bridge-watchdog.plist`（每 5 分钟跑一次）；只在判定 wedge / 异常时写日志到 `~/commandcode-bridge/watchdog.log`，健康时静默
 - 日志：`~/commandcode-bridge/bridge.stdout.log` / `bridge.stderr.log`
-- Hermes provider 注册名：`custom:commandcode`（`providers.commandcode.api = http://127.0.0.1:9992/v1`）
+- Hermes provider 名：**`commandcode-bridge`**（条目 `providers.commandcode-bridge`，`api = http://127.0.0.1:9992/v1`，`key_env = COMMANDCODE_BRIDGE_API_KEY`）；裸名与 `custom:commandcode-bridge` 两种写法都可用。
+  ⚠️ 2026-10-12 之前叫 `commandcode` —— 那是 Hermes **内置模型 provider 的正式名**，会被内置遮蔽（症状：每次重启 Hermes 后报 `agent init failed: ... Set COMMANDCODE_API_KEY.`）。详见维护记录 2026-10-12 条与 `docs/TROUBLESHOOTING-CONNECTION.md` 附录 C。
 - ⚠️ `~/commandcode-bridge/SETUP-NEW-MACHINE.md` 是**仓库手册的本地镜像副本**（非上游文件，未被 bridge 仓库跟踪）。
   用途：在现场改 bridge 时手边就有一份手册，不必切目录。**改动仓库版后必须同步此副本**（`cp docs/SETUP-NEW-MACHINE.md ~/commandcode-bridge/`），
   否则它会悄悄过期（2026-09-14 曾落后 56 行，仍写着旧的「35 个模型 / 两个补丁」）。
@@ -57,3 +58,11 @@
   - **代价与取舍**：真 wedge 的自动恢复从约 6 分钟放宽到约 15 分钟（3 轮 × 60s 探测），换误判重启基本消失。依据：10-08~10-09 的 63 次重启**全是误判**，而真 wedge 一个月只出现 2 次（09-23 / 09-30）——这个交换划算。
   - ⚠️ **宿主机这条根因未处理**（重启 fseventsd 或重启机器都需要 sudo，用户本轮只选了改看门狗）→ 只要 `fseventsd` 继续失控，卡顿依旧存在，只是不再被误当成 bridge 故障。**下次再遇「服务有问题」，先看 `uptime` / `top` 的 load 与 fseventsd，再看 bridge。**
   - **旁证**：修订期间 17:49:15 旧版看门狗又误判了一次——当时机器 load ~15（正在跑 mock 测试），`/health` 5 秒超时 → kickstart，而 bridge 实际 50 秒后才就绪；正是本次要修的形态。
+- 2026-10-12（用户报「每次重启 Hermes 后就报 `agent init failed: No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`」→ **provider 名与内置插件撞名**，已改名根治）：
+  - **症状**：桌面端每次重启弹该错误框；运行中同一条会话却正常（会话钉死 `base_url`，不走名字解析），bridge 七层自检全绿，且从没有人用过 `COMMANDCODE_API_KEY`。
+  - **机制**：`commandcode` 是 Hermes **内置模型 provider** 的 canonical 名（安装树 `hermes-agent/plugins/model-providers/commandcode/`，直连 `api.commandcode.ai`）。`hermes_cli/runtime_provider_custom.py::_shadowed_by_builtin` 的规则：请求名若等于内置 canonical 名 → 直接跳过用户 `providers:` 条目，**与内置插件是否有凭据无关**；只有 `custom:<name>` 前缀被豁免。实测 `--provider commandcode` 必失败、`--provider custom:commandcode` 正常。内置 profile 不归 `hermes plugins` 管（`plugins list` 看不到、`plugins disable` 报 not found）→ 没有开关可关，**只能改自己的名字**。
+  - **为什么"每次重启"才报**：会话把创建时的 provider 名钉在 `state.db` 的 `sessions.model_config` 里（本机 37 个会话，其中 **26 个存裸名 `commandcode`**、11 个存 `custom:commandcode`）；桌面端启动恢复会话时按名字解析 → 命中内置 → AuthError → 弹框。且**选择器 payload 对用户自定义 provider 输出的就是裸 slug**（实测 `{"slug":"commandcode","is_user_defined":true}`），所以从选择器新建的会话也会存裸名 —— 只改老数据治不好，必须改名。
+  - **根治（已执行）**：① 条目改名 `commandcode` → `commandcode-bridge`（`hermes config set` 6 个字段 + `hermes config unset providers.commandcode`；⚠️ `~/.hermes/config.yaml` 受保护，`patch` 工具直接拒绝，必须走 `hermes config`）；② `state.db` 37 行 `model_config.provider` 改新名；③ 两个 cron 用 `hermes cron edit --provider custom:commandcode-bridge`。**功能位只有 `model_config.provider` 一处**：`billing_provider`（18 行）、消息正文/`tool_calls`、`cwd` 与 `git_repo_root` 路径、会话标题里的同名串都是历史记录，一律不动。
+  - **验证**：`_shadowed_by_builtin('commandcode')=True` / `('commandcode-bridge')=False`；两种写法各真跑一次均 200；选择器 payload slug = `commandcode-bridge`（33 个模型在列）；`state.db` 扫旧值 0 行；cron 两任务均 `custom:commandcode-bridge`。备份：`config.yaml.bak-20261012-165216`、`state.db.bak-20261012-165216`、`cron/jobs.json.bak-20261012-165216`。
+  - **文档同步**：`docs/SETUP-NEW-MACHINE.md` §4（12 处 `providers.commandcode.*` + 5 处 `custom:commandcode` 全量改名，并加「绝不能叫 commandcode」的警告，旧写法会复现本 bug）+ `docs/TROUBLESHOOTING-CONNECTION.md`（新症状行 + 附录 C）+ `docs/WHY-BRIDGE.md` + `platforms/pc/README.md`（待办第 7 项：PC 同名同病）+ 手册镜像副本已重新 `cp`（逐字节一致）。
+  - **未解/待查（独立问题）**：抓拍到一次约 60 秒的「全量 503」窗口（16:53:16–16:54:31，所有 chat 在 2~5 毫秒内被拒 `No available CommandCode credentials for model ...`，不走上游），紧跟在一次**客户端中断**之后（日志有 `chat completion aborted: client disconnected`）。代码嫌疑点：`src/provider.ts:170-173` 把「无状态码的失败」记成 `recordFailure(id)` → 60 秒冷却，而客户端中断/网络错误走这条。但**两次定向复现（分别在流开始前后断开客户端）都没有触发**，所以尚未定论、未出补丁；继续查的方向记在 skill `hermes-external-provider-bridge`。

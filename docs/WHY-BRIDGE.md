@@ -29,7 +29,7 @@ Hermes 的 provider 注册表（`auth.py` 的 `PROVIDER_REGISTRY`）里有很多
    `provider.ts` 里有完整的 `credential-router`、cooldown、retry-backoff、余额告警——这是把一把共享 key 当多路负载均衡用。这是订阅类产品的专属逻辑，不属于 agent 核心要内置的东西。
 
 4. **Hermes 官方给的接入姿势，就是"本地 bridge + custom provider"。**
-   你 Mac 上搭的 `custom:commandcode` → `http://127.0.0.1:9992/v1` → `https://api.commandcode.ai` 不是变通方案，**这就是 Hermes 设计上支持的接入方式**——`custom:<name>` provider 体系就是为了接这类本地代理/网关设计的。
+   你 Mac 上搭的 `custom:commandcode-bridge` → `http://127.0.0.1:9992/v1` → `https://api.commandcode.ai` 不是变通方案，**这就是 Hermes 设计上支持的接入方式**——`custom:<name>` provider 体系就是为了接这类本地代理/网关设计的。
 
 ## 3. 架构图
 

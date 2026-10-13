@@ -19,8 +19,9 @@
 - 自启：任务计划程序 `CommandCodeBridgeWatchdog`（每分钟，pythonw 无窗口）
 - watchdog 脚本：`C:\Users\<user>\AppData\Local\hermes\scripts\watchdog_commandcode_bridge.py`
 - 日志：bridge 目录内 `bridge.log`（主）/ `bridge.err.log` / `bridge.guard.log`（guard 自身）
-- Hermes provider 注册名：`custom:commandcode`（`base_url = http://127.0.0.1:9992/v1`，`key_env = COMMANDCODE_BRIDGE_API_KEY`，见 `~/AppData/Local/hermes/config.yaml`）
-- Hermes model_aliases：`cc-ds` → deepseek/deepseek-v4-pro、`cc-gpt` → gpt-5.6-sol、`cc-glm` → zai-org/GLM-5.2、`cc-qwen` → Qwen/Qwen3.8-Max（均走 `custom:commandcode`）
+- Hermes provider 名：`commandcode`（`base_url = http://127.0.0.1:9992/v1`，`key_env = COMMANDCODE_BRIDGE_API_KEY`，见 `~/AppData/Local/hermes/config.yaml`）
+  ⚠️ **这个名字会撞上 Hermes 内置同名 provider**（内置遮蔽用户条目），症状是每次重启 Hermes 后桌面会话报 `agent init failed: ... Set COMMANDCODE_API_KEY.`。**PC 待办第 7 项：改成 `commandcode-bridge`**（mac 侧 2026-10-12 已改，做法见 `platforms/macos/README.md` 维护记录同日条）
+- Hermes model_aliases：`cc-ds` → deepseek/deepseek-v4-pro、`cc-gpt` → gpt-5.6-sol、`cc-glm` → zai-org/GLM-5.2、`cc-qwen` → Qwen/Qwen3.8-Max（均走本 provider；改名后需一并对齐到 `custom:commandcode-bridge`）
 
 ## 自启方案（任务计划，替代 mac 的 launchd）
 
@@ -48,7 +49,7 @@
 | .env 模板 | 全量版（多 key / router 注释保留） | 精简版：单 key 模式 9 项，未启用多 key 与 commandcode-router |
 | 网络 | 海外直连 | **大陆网络：gpt-5.6-luna 不可用**，客户端别名别选 luna（cc-gpt 默认已指向 gpt-5.6-sol） |
 
-共同点：同一份 `.env` 语义、同一补丁、同一端口 `127.0.0.1:9992`、Hermes 侧同为 `custom:commandcode`。
+共同点：同一份 `.env` 语义、同一补丁、同一端口 `127.0.0.1:9992`、Hermes 侧同为本地 bridge provider（mac 现名 `commandcode-bridge`；PC 仍为 `commandcode`，待按第 7 项改名）。
 
 ## 维护记录
 
@@ -68,3 +69,13 @@
   - **背景**：mac 的看门狗旧判据在 10-09 单日重启 22 次、10-08 单日 41 次，事后核对**全是误判**——根因是宿主机卡顿（`fseventsd` 失控占 12 GB 内存 +100% CPU，机器 70 天未重启，load 22~27），探针超时被一律读成 wedge。四处修法：先看端口有无监听（端口在监听 + `/health` 超时 → 按「宿主机卡顿」只记账，连续 3 轮才兜底）；超时放宽（`/health` 5s→10s、chat 30s→60s）；**重启后轮询 90 秒**再下结论（实测重启→listening 中位数 22 秒，旧版等 10 秒就报「需人工介入」= 每次重启都产生假警报）；探针 `max_tokens` 32→128（32 会触发上游空可见回复 502）。
   - **PC 现状（读 `watchdog_commandcode_bridge.py` 确认）**：它 `/health` 不通时**先看有没有 bridge 的 node 进程，有就等下一轮**——所以 PC **不会**像 mac 那样在宿主机卡顿时连环误判重启（这点比 mac 旧版安全）；代价是**它永远检测不到 wedge**（进程活着 + chat 僵死 = 一直「等下一轮」），即 09-30 记录的那个盲区在 PC 侧仍然存在。
   - **PC 要做的**：给 watchdog 加一条 chat 路径探测（`max_tokens ≥ 128`，超时 ≥ 60s），但**必须连同防误判的判据一起加**，否则会重演 mac 这次的问题：先查端口/进程存在（进程在 → 只记账，连续 3 轮才拉起）、`/health` 正常而 chat 连续 3 次超时才判 wedge、拉起后轮询 90 秒再下结论。实现与验证方式见 `platforms/macos/bridge_watchdog.sh`（脚本头部注释写了每条判据的理由）及其维护记录 2026-10-09 条。
+- 2026-10-12（**待 PC 同步，mac 侧已改；新增第 7 项待办**：provider 改名）：
+  - **背景**：`commandcode` 是 Hermes **内置模型 provider** 的正式名，用户自定义的同名条目会被内置遮蔽
+    （`hermes_cli/runtime_provider_custom.py::_shadowed_by_builtin`：请求名 == 内置 canonical 名即跳过用户条目，
+    **与该内置是否有凭据无关**；只有 `custom:<name>` 前缀豁免）。内置 profile 不归 `hermes plugins` 管，无法禁用，
+    **只能给自己的条目改名**。mac 侧症状是「每次重启 Hermes 后」弹
+    `agent init failed: No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`：
+    会话把创建时的 provider 名钉在 `state.db`，重启恢复时按名字解析命中内置 → 认证失败；运行中的会话因带着
+    自己钉死的 `base_url` 而正常，所以看起来「只有重启才出问题」。选择器新建的会话也会存裸 slug，因此只改老数据不够。
+  - **PC 要做的（第 7 项）**：① 改名 — `hermes config set providers.commandcode-bridge.{name,api,key_env,transport,default_model,discover_models}` 六个字段（值同现有 `providers.commandcode`），确认无误后 `hermes config unset providers.commandcode`；② 库里已存旧名的会话改过来（`state.db` 的 `sessions.model_config.provider`，注意 `billing_provider`/消息正文/`cwd` 是历史记录不要动）；③ 两个定时任务的 provider 改 `custom:commandcode-bridge`；④ `model_aliases`（`cc-*`）对齐；⑤ 验证：`hermes chat -Q --provider commandcode-bridge -m deepseek/deepseek-v4.1-flash -q 'Reply exactly OK'` 与 `--provider custom:commandcode-bridge` 各跑一次都通。
+    完整命令与现象解释见 `docs/TROUBLESHOOTING-CONNECTION.md` 附录 C（2026-10-12 新增）与 `platforms/macos/README.md` 同日维护记录。

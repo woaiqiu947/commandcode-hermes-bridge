@@ -108,13 +108,20 @@ curl -fsS http://127.0.0.1:9992/health
 ## 4. 在 Hermes 注册 provider（与操作系统无关，命令完全一致）
 
 ```bash
-hermes config set providers.commandcode.name commandcode
-hermes config set providers.commandcode.api "http://127.0.0.1:9992/v1"
-hermes config set providers.commandcode.key_env COMMANDCODE_BRIDGE_API_KEY
-hermes config set providers.commandcode.transport openai_chat
-hermes config set providers.commandcode.default_model "deepseek/deepseek-v4.1-flash"
-hermes config set providers.commandcode.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
+hermes config set providers.commandcode-bridge.name commandcode-bridge
+hermes config set providers.commandcode-bridge.api "http://127.0.0.1:9992/v1"
+hermes config set providers.commandcode-bridge.key_env COMMANDCODE_BRIDGE_API_KEY
+hermes config set providers.commandcode-bridge.transport openai_chat
+hermes config set providers.commandcode-bridge.default_model "deepseek/deepseek-v4.1-flash"
+hermes config set providers.commandcode-bridge.models "[gpt-5.6-sol,gpt-5.6-luna,deepseek/deepseek-v4-pro,deepseek/deepseek-v4.1-flash,zai-org/GLM-5.2,zai-org/GLM-5.2-Fast,zai-org/GLM-5.3,z-ai/glm-5.3-flash,moonshotai/Kimi-K3,moonshotai/Kimi-K2.7-Code,moonshotai/Kimi-K2.7-Code-Highspeed,MiniMaxAI/MiniMax-M3,Qwen/Qwen3.6-Plus,Qwen/Qwen3.7-Plus,Qwen/Qwen3.7-Max,Qwen/Qwen3.8-Max,Qwen/Qwen3.8-27B,Qwen/Qwen3.8-Flash,xiaomi/mimo-v2.5,xiaomi/mimo-v2.5-pro,tencent/hy3-paid,tencent/hy4-preview,xai/grok-4.5,xai/grok-4.6,google/gemini-3.7-flash,stepfun/Step-3.5-Flash,stepfun/Step-3.7-Flash,nvidia/nemotron-3-ultra-550b-a55b,thinkingmachines/inkling,thinkingmachines/inkling-small,meta/muse-spark-1.2,meta/muse-spark-1.2-contributor]"
 ```
+
+> ⚠️ **provider 名绝对不要写成 `commandcode`**（旧版手册正是那么写的，照做会踩坑）。
+> `commandcode` 是 Hermes **内置模型 provider** 的正式名：用户的 `providers.commandcode` 条目会被内置的遮蔽
+> （`hermes_cli/runtime_provider_custom.py::_shadowed_by_builtin`——请求名等于内置 canonical 名即跳过用户条目，
+> **与内置是否有凭据无关**），报 `No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`
+> （指向错误的主机与 key）。所以统一用 `commandcode-bridge`：不与任何内置同名，裸名与 `custom:` 两种写法都可用。
+> 症状与修法见 `TROUBLESHOOTING-CONNECTION.md`「重启后报缺 COMMANDCODE_API_KEY」一节。
 
 把第 2 步的 `BRIDGE_API_KEY` 追加进 Hermes 的私有 env（路径用命令查，别硬编码）：
 
@@ -126,7 +133,7 @@ echo "COMMANDCODE_BRIDGE_API_KEY=<你的BRIDGE_API_KEY>" >> "$HERMES_ENV"   # Wi
 不修改现有默认模型；想切换默认再执行（可选）：
 
 ```bash
-hermes config set model.provider custom:commandcode
+hermes config set model.provider custom:commandcode-bridge
 hermes config set model.default deepseek/deepseek-v4.1-flash
 ```
 
@@ -138,10 +145,10 @@ hermes config set model.default deepseek/deepseek-v4.1-flash
 ## 5. 冒烟测试
 
 ```bash
-hermes chat -Q --provider custom:commandcode -m gpt-5.6-luna -q 'Reply exactly COMMANDCODE_HERMES_OK'
-hermes chat -Q --provider custom:commandcode -m zai-org/GLM-5.2 -q 'Reply exactly GLM_OK'
-hermes chat -Q --provider custom:commandcode -m Qwen/Qwen3.8-Max -q 'Reply exactly GOAT_OK'
-hermes chat -Q --provider custom:commandcode -m deepseek/deepseek-v4.1-flash -q 'Reply exactly DS41_OK'
+hermes chat -Q --provider custom:commandcode-bridge -m gpt-5.6-luna -q 'Reply exactly COMMANDCODE_HERMES_OK'
+hermes chat -Q --provider custom:commandcode-bridge -m zai-org/GLM-5.2 -q 'Reply exactly GLM_OK'
+hermes chat -Q --provider custom:commandcode-bridge -m Qwen/Qwen3.8-Max -q 'Reply exactly GOAT_OK'
+hermes chat -Q --provider custom:commandcode-bridge -m deepseek/deepseek-v4.1-flash -q 'Reply exactly DS41_OK'
 ```
 
 都原样返回即成功。
@@ -166,13 +173,13 @@ models: '[gpt-5.6-sol,...]'
 ```
 
 这会导致模型选择器显示空列表、解析异常，或者把整段字符串当成一个模型。不要继续重复执行
-`hermes config set providers.commandcode.models "[... ]"`。
+`hermes config set providers.commandcode-bridge.models "[... ]"`。
 
 先删除错误的 `models` 键，再启用动态发现：
 
 ```bash
-hermes config unset providers.commandcode.models
-hermes config set providers.commandcode.discover_models true
+hermes config unset providers.commandcode-bridge.models
+hermes config set providers.commandcode-bridge.discover_models true
 ```
 
 > 版本注记（2026-09-08，Hermes v0.18.2 实测）：`hermes config unset` / `hermes
@@ -207,7 +214,7 @@ curl -fsS http://127.0.0.1:9992/v1/models \\
 ```
 
 如果 `/v1/models` 返回 401，说明当前 shell 没有加载 `COMMANDCODE_BRIDGE_API_KEY`；不要把 key 粘贴到聊天或日志中，直接重新执行第 3、4 步的本机配置。
-如果 `/v1/models` 返回 32 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
+如果 `/v1/models` 返回 32 个模型但 `hermes model` 仍显示 0 个，说明是该 Hermes 版本的自定义 provider 动态发现兼容性问题；此时不要手工把 JSON/CSV 拼进 `providers.commandcode-bridge.models`，应升级 Hermes 后重新执行本节，或把该现象和 `hermes --version` 提交给 Hermes 维护者。
 
 > 版本注记（2026-09-08，Hermes v0.18.2 实测）：该版本的动态发现**正常**。
 > 无头复现 picker 同款路径（`list_authenticated_providers`，经
@@ -484,7 +491,7 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 
 | 位置 | 原值 | 新值 |
 |---|---|---|
-| Hermes `providers.commandcode.default_model` | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4.1-flash` |
+| Hermes `providers.commandcode-bridge.default_model` | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4.1-flash` |
 | bridge `.env` `COMMANDCODE_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-v4.1-flash` |
 | Hermes MoA 聚合器（**DeepSeek 官方** provider）`moa.aggregator.model` + `moa.presets.default.aggregator.model` | `deepseek-v4-flash`（旧名） | `deepseek-flash`（V4.1 正式名） |
 | cron 日报 `89ebfc3149f0` / 周报 `0d0aacfae6ef` 的 model | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4.1-flash` |
@@ -492,7 +499,7 @@ muse-spark-1.3、gemini-3.8-flash、deepseek-v4.1-flash、LongCat-2.0 等，均�
 
 cron 的 model 是 user-owned 字段，`cronjob` 工具改不了，须用 `hermes cron edit <job_id> --model ...`。
 生效验证：`launchctl kickstart -k` → `/health` 的 `default_model` 变 `deepseek/deepseek-v4.1-flash`；
-`hermes config get providers.commandcode.default_model`、`hermes cron list` 复核。
+`hermes config get providers.commandcode-bridge.default_model`、`hermes cron list` 复核。
 
 补充记录（2026-09-11 同日复查）：
 

@@ -1,6 +1,6 @@
 # 连接错误排查手册 —— “另一台机器连不上 / 模型不能用”
 
-> **适用症状**：Hermes 里用 `custom:commandcode` 时，模型列表为空、选不了模型、对话报
+> **适用症状**：Hermes 里用 `custom:commandcode-bridge` 时，模型列表为空、选不了模型、对话报
 > **connection error / 连接失败 / 401 / 连不上 127.0.0.1:9992**。
 > **面向对象**：新装的机器（尤其是**另一台电脑**）。本文以 **Windows** 为主，macOS 命令见
 > [附录 A](#附录-a-macos-命令)。
@@ -256,6 +256,7 @@ grep -E '^REQUEST_BODY_LIMIT_BYTES=|^COMMANDCODE_LEGACY_MODEL_ALIAS=' ~/commandc
 | 计划任务整轮失败、报 *provider unresponsive / no response received* | 上游长时间零响应，Hermes 看门狗放弃；先按 ⑥⑦ 排除本机因素，再查上游/额度 | ⑥ ⑦ + `/admin/commandcode/credentials` |
 | 聊天**一直转圈**、无流式输出，但 `/health` 与 `/v1/models` 都正常 | bridge 进程「活着但 chat 路径僵死（wedge）」：chat 请求被接受却永不完成、无上游连接（运行数天后出现，2026-09-23 / 09-30 两次实测）。macOS 已有看门狗自动检测重启（`com.commandcode.bridge-watchdog`）；手动重启 `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge` | 看门狗 + 附录 A |
 | bridge **反复重启** / 「服务有问题」但自检七层全绿 | **宿主机卡顿被误判成 bridge 故障**：`/health` 与 chat 探测超时（本机健康请求常态就有 24~28 秒），看门狗据此重启。先量宿主机：`uptime`（load vs 核数）、`top -l 3`（`fseventsd` 失控 / `kernel_task`）、可用内存与 pageout、开机天数。bridge 进程 CPU ~1% 却响应慢 ⇒ 它是受害者 | 附录 A ⑥ 的 2026-10-09 补充 + `~/commandcode-bridge/watchdog.log` |
+| **每次重启 Hermes 后**弹 `agent init failed: No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`（同一会话运行中却正常） | provider 名与 Hermes **内置**同名 provider 撞名：内置遮蔽用户条目（与该内置是否有凭据无关）；会话把旧名钉在 `state.db` 的 `model_config.provider`，重启恢复会话时解析失败 | 附录 C |
 
 ---
 
@@ -312,6 +313,66 @@ macOS 的桥接资产在 `platforms/macos/`（plist 模板 + env 模板），安
   （§2 配 `.env`、§3 启动、§4 注册 provider、§5.1 模型列表问题、§7 故障表、§8 本地补丁）
 - 为什么要 bridge（原理）→ **[WHY-BRIDGE.md](WHY-BRIDGE.md)**
 - 本文只聚焦“**连接不上 / 模型不能用**”这一类问题的**分层定位**。
+
+---
+
+## 附录 C：provider 名撞内置 → 重启后报缺 `COMMANDCODE_API_KEY`（2026-10-12）
+
+**症状**：每次重启 Hermes 后弹
+`── Hermes error details ── agent init failed: No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`
+—— 但同一条会话在重启前用得好好的，bridge 七层自检全绿，也没有任何东西用过 `COMMANDCODE_API_KEY`。
+
+**为什么**：`commandcode` 是 Hermes **内置模型 provider** 的正式名（安装树
+`hermes-agent/plugins/model-providers/commandcode/`，直连 `api.commandcode.ai`，凭据变量就叫
+`COMMANDCODE_API_KEY`）。解析规则在 `hermes_cli/runtime_provider_custom.py::_shadowed_by_builtin`：
+
+```python
+if requested_norm == "custom" or requested_norm.startswith("custom:"):
+    return False                              # custom: 前缀 → 强制用你定义的条目
+canonical = rp.auth_mod.resolve_provider(requested_norm)
+return (canonical or "").lower() == requested_norm   # 请求名 == 内置正式名 → 遮蔽你的条目
+```
+
+**关键点：遮蔽只看名字，与内置插件有没有凭据无关**（所以“把 key 删掉就会回落到我的条目”是错的）。
+内置 profile 也不归 `hermes plugins` 管（`plugins list` 里看不到，`plugins disable` 报 not found），
+没有开关能关掉它 → **只能给自己的条目换个不撞名的名字**。
+
+**为什么偏偏“重启后”才报**：会话创建时会把 provider 名钉进 `state.db` 的
+`sessions.model_config.provider`；桌面端启动恢复会话时按名字解析 → 命中内置 → 认证失败 → 弹框。
+运行中的会话带着自己钉死的 `base_url`，不走名字解析，所以看起来“重启前一切正常”。
+更麻烦的是**桌面选择器对用户自定义 provider 输出的就是裸 slug**（`{"slug":"commandcode","is_user_defined":true}`，
+用 `build_model_options_payload(...)` 可核实），因此从选择器新建的会话会继续存裸名，改名之前会不断复发。
+
+**修法（mac 侧 2026-10-12 已执行，任一台机器照做）**：
+
+```bash
+# ① 改名（配置文件受保护，agent 不能直接改，必须走 hermes config；先 set 新名再 unset 旧名）
+hermes config set providers.commandcode-bridge.name commandcode-bridge
+hermes config set providers.commandcode-bridge.api "http://127.0.0.1:9992/v1"
+hermes config set providers.commandcode-bridge.key_env COMMANDCODE_BRIDGE_API_KEY
+hermes config set providers.commandcode-bridge.transport openai_chat
+hermes config set providers.commandcode-bridge.default_model "deepseek/deepseek-v4.1-flash"
+hermes config set providers.commandcode-bridge.discover_models true
+hermes config unset providers.commandcode
+
+# ② 把库里存了旧名的会话改过来（只有 model_config.provider 是功能位；
+#    billing_provider、消息正文、cwd、标题里的同名串都是历史记录，别动）
+sqlite3 ~/.hermes/state.db "update sessions set model_config=replace(model_config,'"provider": "commandcode"','"provider": "commandcode-bridge"') where json_extract(model_config,'$.provider')='commandcode';"
+sqlite3 ~/.hermes/state.db "update sessions set model_config=replace(model_config,'"provider": "custom:commandcode"','"provider": "commandcode-bridge"') where json_extract(model_config,'$.provider')='custom:commandcode';"
+
+# ③ 定时任务
+hermes cron list                       # 取 job id
+hermes cron edit <job_id> --provider custom:commandcode-bridge
+
+# ④ 验证
+hermes config get providers            # 只剩 commandcode-bridge
+hermes chat -Q --provider commandcode-bridge -m deepseek/deepseek-v4.1-flash -q 'Reply exactly OK'
+hermes chat -Q --provider custom:commandcode-bridge -m deepseek/deepseek-v4.1-flash -q 'Reply exactly OK'
+```
+
+⚠️ 别用 `commandcode` 当自己的 provider 名：`--provider commandcode` 永远走内置那条，必然失败
+（实测：裸名报 `No usable credentials found ... Set COMMANDCODE_API_KEY`，`custom:` 前缀正常）。
+新机器照 `SETUP-NEW-MACHINE.md` §4 的 `commandcode-bridge` 写法即可。
 
 ---
 
