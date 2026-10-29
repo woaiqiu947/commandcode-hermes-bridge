@@ -24,6 +24,19 @@ CommandCode 与 Hermes Agent 的本地桥接服务、安装配置、模型目录
 - [连接错误排查手册 / Connection Troubleshooting](docs/TROUBLESHOOTING-CONNECTION.md)
 - [为什么需要 bridge / Why a bridge?](docs/WHY-BRIDGE.md)
 
+## 桌面插件 / Desktop plugins
+
+**会话全文搜索**：在所有 Hermes 会话的消息正文里搜索，点击结果直接跳转。
+
+```bash
+bash scripts/install-session-search.sh
+```
+
+装完在 Hermes 桌面端按 `⌘K` → `Reload desktop plugins` → 回车，侧边栏底部出现「会话搜索」。
+
+自包含脚本（插件源码内嵌），只需这一个文件就能在任意机器重建；命名 profile 场景用
+`HERMES_HOME=~/.hermes/profiles/<名字> bash scripts/install-session-search.sh`。
+
 ## 仓库结构（操作包 / Runbook）
 
 本仓库不只是手册——它是 **mac 与 pc 两台机器的 Hermes 共同维护的"操作包"**：手册 + 可复用脚本/配置/补丁。平台无关资产放根目录，平台专属资产按平台分区（各平台由该机器的 Hermes 整理）。
@@ -38,7 +51,8 @@ commandcode-hermes-bridge/
 │   └── 0002-stream-abort-error-handling.patch  # 客户端中断流式请求不再崩 bridge 进程
 ├── scripts/
 │   ├── probe_bridge_models.py   # 单飞探测模型可用性（跨平台）
-│   └── doctor.sh                # 一键自检（macOS / Linux）
+│   ├── doctor.sh                # 一键自检（macOS / Linux）
+│   └── install-session-search.sh # 会话全文搜索桌面插件（自包含安装）
 └── platforms/             # ★ 按平台分区的自产资产
     ├── macos/             # ← mac 的 Hermes 维护
     │   ├── README.md
