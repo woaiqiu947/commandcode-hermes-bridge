@@ -4,7 +4,7 @@
 > 本手册是通用步骤，按当前已跑通的 macOS 实例整理（2026-09-02）。Windows / Linux 差异处已标注。
 > **上游版本基线：1.53.0.a（2026-09-10 由 1.38.2.a 升级）**；本机 = 上游 main + 仓库 `patches/` 四个本地补丁
 > （`0001-canonical-models-only.patch` 去别名 + 白名单唯一权威；`0002-stream-abort-error-handling.patch` 流式中断不再崩进程；
-> `0003-cooldown-cleared-on-success.patch` 请求成功后清除残留冷却；`0004-legacy-model-alias.patch` 旧模型 ID 请求侧兜底，均见 §8）。
+> `0003-cooldown-cleared-on-success.patch` 请求成功后清除残留冷却；`0004-legacy-model-alias.patch` 旧模型 ID 请求侧兜底；`0005-auth-cooldown-and-diagnostics.patch` 上游 401 不再永久禁用凭证、503 带真实原因，均见 §8）。
 > 全程不需要把 CommandCode Studio key 发给任何人或贴进聊天；key 只写进本机文件。
 
 ## 0. 前置条件核对
@@ -312,6 +312,7 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 | 长会话突然 **413 Payload Too Large**（Hermes 显示 `413 payload too large. Cannot compress further.`） | `.env` 的 `REQUEST_BODY_LIMIT_BYTES` 太小（上游默认 1 MiB）；改 `16777216` 并**重启 bridge**。见 §8 ⑥ |
 | 报 **400 `Model "deepseek/deepseek-v4-flash" is not allowed`**，但白名单看着没问题 | 客户端残留旧模型 ID（桌面端记住的选择 / 创建时钉死模型的旧会话 / 别的机器）：开 `COMMANDCODE_LEGACY_MODEL_ALIAS=true` + 重打 `patches/0004`，见 §8 ⑤ |
 | **补丁/配置改完没效果**、老问题原样复现 | 进程跑的仍是旧构建：`npm run build` 不会触发 KeepAlive 重启。比对 `ls -lT dist/*.js` 与 `ps -o lstart -p $(lsof -ti :9992)`，然后重载服务。见 TROUBLESHOOTING 第 ⑥ 层 |
+| 每条消息都回 **503 `No available CommandCode credentials for model …`**，`/health` 却正常 | 上游把 `.env` 里那把 key 判成无效（401），或凭证正在冷却。先直连验：`curl -o /dev/null -w '%{http_code}' https://api.commandcode.ai/alpha/whoami -H "Authorization: Bearer $COMMANDCODE_API_KEY"` —— **401 = 换 key**（Studio → API keys，`.env` 两处都改），`200` = 等冷却/看 503 message 里的原因。见 TROUBLESHOOTING 附录 D |
 | 返回上游余额/权限错误 | 安装本身健康，是订阅档位/额度问题；看日志：macOS `tail -50 ~/commandcode-bridge/bridge.stdout.log`，Windows 在启动窗口里直接可见 |
 | 想更新 bridge | `git -C ~/commandcode-bridge pull && cd ~/commandcode-bridge && npm install --include=dev && npm run build`，再重启服务 |
 | 改了 `default_model` 但当前对话/新会话还是旧模型 | 会话在**创建时**钉死模型（`sessions.model`），改配置**不追溯**已存在的会话。新开会话，或在客户端模型选择器里切。查证：`sqlite3 ~/.hermes/state.db "select id, model from sessions order by started_at desc limit 5;"` |
@@ -320,14 +321,15 @@ CommandCode 目录里同一个模型今天有**两个**可用 ID：
 
 ## 8. 本地定制补丁（⚠️ git pull 升级后需重打）
 
-对应仓库 `patches/` **四个文件**：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）、
+对应仓库 `patches/` **五个文件**：**`0001-canonical-models-only.patch`**（① + ②，改 `src/config.ts` / `src/types.ts`）、
 **`0002-stream-abort-error-handling.patch`**（③，改 `src/provider-chat.ts` + 新增 `tests/provider-chat.test.ts`）、
 **`0003-cooldown-cleared-on-success.patch`**（④，改 `src/credential-router.ts` + `tests/credential-router.test.ts` / `tests/provider.test.ts`）、
-**`0004-legacy-model-alias.patch`**（⑤，改 `src/config.ts` + 新增 `tests/legacy-model-alias.test.ts`）。
-打完 `npm run build` 并**重启服务**（⚠️ 只 build 不重启 = 改动不生效，见 TROUBLESHOOTING 第 ⑥ 层）；一键重打四个：
+**`0004-legacy-model-alias.patch`**（⑤，改 `src/config.ts` + 新增 `tests/legacy-model-alias.test.ts`）、
+**`0005-auth-cooldown-and-diagnostics.patch`**（⑥，改 `src/credential-router.ts` / `src/config.ts` / `src/types.ts` / `src/commandcode.ts` / `src/server.ts` + 4 个测试夹具；**上游 401 只禁用 5 分钟而不是永久**，503 的 message 带每把 key 的真实原因并打 warn 日志，见 TROUBLESHOOTING 附录 D）。
+打完 `npm run build` 并**重启服务**（⚠️ 只 build 不重启 = 改动不生效，见 TROUBLESHOOTING 第 ⑥ 层）；一键重打五个：
 
 ```bash
-cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch patches/0004-*.patch && npm run build
+cd ~/commandcode-bridge && git apply patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch patches/0004-*.patch patches/0005-*.patch && npm run build
 ```
 
 另有**几处不进补丁的本地改动**（上游树里没有或以本地状态存在，`git pull` 一般不会冲突）：

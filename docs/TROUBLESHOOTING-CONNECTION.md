@@ -257,6 +257,7 @@ grep -E '^REQUEST_BODY_LIMIT_BYTES=|^COMMANDCODE_LEGACY_MODEL_ALIAS=' ~/commandc
 | 聊天**一直转圈**、无流式输出，但 `/health` 与 `/v1/models` 都正常 | bridge 进程「活着但 chat 路径僵死（wedge）」：chat 请求被接受却永不完成、无上游连接（运行数天后出现，2026-09-23 / 09-30 两次实测）。macOS 已有看门狗自动检测重启（`com.commandcode.bridge-watchdog`）；手动重启 `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge` | 看门狗 + 附录 A |
 | bridge **反复重启** / 「服务有问题」但自检七层全绿 | **宿主机卡顿被误判成 bridge 故障**：`/health` 与 chat 探测超时（本机健康请求常态就有 24~28 秒），看门狗据此重启。先量宿主机：`uptime`（load vs 核数）、`top -l 3`（`fseventsd` 失控 / `kernel_task`）、可用内存与 pageout、开机天数。bridge 进程 CPU ~1% 却响应慢 ⇒ 它是受害者 | 附录 A ⑥ 的 2026-10-09 补充 + `~/commandcode-bridge/watchdog.log` |
 | **每次重启 Hermes 后**弹 `agent init failed: No usable credentials found for provider 'commandcode'. Set COMMANDCODE_API_KEY.`（同一会话运行中却正常） | provider 名与 Hermes **内置**同名 provider 撞名：内置遮蔽用户条目（与该内置是否有凭据无关）；会话把旧名钉在 `state.db` 的 `model_config.provider`，重启恢复会话时解析失败 | 附录 C |
+| 每条消息都回 **HTTP 503 `No available CommandCode credentials for model …`**，而 `/health`、`/v1/models`、七层自检全绿、进程活着 | **上游把 `.env` 里那把 key 判成无效（401）**：bridge 侧凭证被禁用，所有 chat 在 `select()` 处秒回 503（2026-10-29 静默停摆 7.5 小时）。先用 `curl /alpha/whoami` 验：401=换 key，超时/无响应才是另一回事。**别急着重启** | 附录 D |
 
 ---
 
@@ -373,6 +374,62 @@ hermes chat -Q --provider custom:commandcode-bridge -m deepseek/deepseek-v4.1-fl
 ⚠️ 别用 `commandcode` 当自己的 provider 名：`--provider commandcode` 永远走内置那条，必然失败
 （实测：裸名报 `No usable credentials found ... Set COMMANDCODE_API_KEY`，`custom:` 前缀正常）。
 新机器照 `SETUP-NEW-MACHINE.md` §4 的 `commandcode-bridge` 写法即可。
+
+---
+
+## 附录 D：上游 key 失效 → 全量 503 却不报警（2026-10-29）
+
+**症状**：Hermes 每条消息都回
+
+```
+layer: provider | code: overloaded | retryable: true
+error: HTTP 503: No available CommandCode credentials for model deepseek/deepseek-v4.1-flash
+```
+
+`/health` 200、`/v1/models` 200、`doctor.sh` 七层全绿，bridge 进程好好活着；
+`watchdog.log` 里每 5 分钟一条「chat 探测返回 HTTP 503（有响应、非超时），非 wedge，跳过重启」。
+
+**根因**：**上游把 `.env` 里那把 key 判成无效**，不是 bridge 挂了。直接绕过 bridge 验：
+
+```bash
+# 只打印状态码，不打印 key 本身（值从 .env 里取，注意行内 `=` 后面可能有空格）
+KEY=$(grep -E '^COMMANDCODE_API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '[:space:]')
+curl -s -o /dev/null -w 'whoami:%{http_code}\n' https://api.commandcode.ai/alpha/whoami \
+  -H "Authorization: Bearer $KEY"      # 200=key 有效；401=key 被吊销/过期（就是本例）
+```
+`401` 的 body 是 `{"success":false,"error":{"code":"UNAUTHORIZED",...,"message":"Invalid 'Authorization' header or token."}}`。
+
+**为什么整晚没人知道**（两个盲点，已在 2026-10-29 修掉）：
+
+1. bridge 侧：`recordFailure(401)` 把凭证写成 `disabledUntil = MAX_SAFE_INTEGER`（永久禁用），
+   之后每个请求在 `select()` 处筛出空候选、秒回 503，**只有重启进程才恢复**；这条 503 还不打日志。
+   实测：最后一次成功 01:35，之后连续 99 次 503，直到 09:07 用户手动报错。
+   现有行为（`patches/0005`）：401 只禁用 `COMMANDCODE_AUTH_COOLDOWN_MS`（默认 5 分钟）；
+   计费接口（同一把 key）一旦返回 200 就立刻解禁；503 的 message 会带每把 key 的具体原因，
+   并在 bridge 日志打一条 `code=commandcode_no_available_credential` 的 warn。
+   现在的 503 长这样：
+   ```
+   No available CommandCode credentials for model X (default: auth for 268s more; last billing error: CommandCode upstream returned 401 Unauthorized)
+   ```
+2. 看门狗侧：旧判据把「有 HTTP 响应」一律读成「bridge 正常」。现在会读响应体，
+   命中 `commandcode_no_available_credential` 就单独记账 + 弹一条 macOS 通知（同一事故 6 小时一次），
+   仍然不重启（重启救不了 key）。日志行变成：
+   `chat 探测返回 HTTP 503：凭证不可用（连续 N 轮），需人工换 key 或等冷却。详情: ...`
+
+**换 key（只有人工能做）**：
+
+1. 登录 https://commandcode.ai → Studio → API keys 新建一把（**CLI 与 API 用同一把 key**）。
+2. 写进 `~/commandcode-bridge/.env` 的 `COMMANDCODE_API_KEY=` 和 `COMMANDCODE_API_KEYS=`
+   **两处都要改**（后者优先级更高；Windows 路径 `%USERPROFILE%\commandcode-bridge\.env`）。
+   值里不要留 `= ` 后面那个空格——旧模板带空格，`source .env` 会报 `command not found`。
+3. 重启让它生效（**改 `.env` 不会自动重载**）：
+   `launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge`
+4. 验证顺序：`/alpha/whoami` 200 → 非流式 chat 200 → 流式 chat 200 → `scripts/doctor.sh` 七层全绿。
+   注意 chat 验证时 `max_tokens` 要给够（≥256）：推理模型会把 64 token 全花在 `reasoning_content` 上，
+   返回 502 `empty visible response`，看起来像没修好。
+
+**别做的事**：看到 503 就重启 bridge。凭证问题是「重启也立刻再坏」，只会掐断在飞行的请求；
+先按上面的 `whoami` 一眼分清是 **key 失效**（401）还是 **bridge 僵死**（超时）再动手。
 
 ---
 

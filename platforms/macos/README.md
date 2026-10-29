@@ -13,7 +13,7 @@
 
 ## 路径约定（macOS）
 
-- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 下四个补丁文件：0001-canonical-models-only / 0002-stream-abort-error-handling / 0003-cooldown-cleared-on-success / 0004-legacy-model-alias）
+- bridge 源码：`~/commandcode-bridge`（上游 clone，本地打了仓库 `patches/` 下五个补丁文件：0001-canonical-models-only / 0002-stream-abort-error-handling / 0003-cooldown-cleared-on-success / 0004-legacy-model-alias / 0005-auth-cooldown-and-diagnostics）
 - ⚠️ **本目录描述的是"一台完备 mac"的状态，不等于每台 mac 都这样**——不同 mac 的 live 状态可能落后（补丁数量、白名单条目数、手册镜像、`.prettierignore` 都可能不同）。**核对自己这台请跑 `scripts/doctor.sh`**，不要照抄文档里的数字。已知差异见下方维护记录 2026-09-14 条。
 - 端口：以 `.env` 的 `PORT` 为准（当前各机为 `9992`；早期文档曾写 `8787`，属旧值/笔误，以 `lsof -nP -iTCP -sTCP:LISTEN` 实测为准）
 - 自启：`~/Library/LaunchAgents/com.commandcode.bridge.plist`
@@ -66,3 +66,13 @@
   - **验证**：`_shadowed_by_builtin('commandcode')=True` / `('commandcode-bridge')=False`；两种写法各真跑一次均 200；选择器 payload slug = `commandcode-bridge`（33 个模型在列）；`state.db` 扫旧值 0 行；cron 两任务均 `custom:commandcode-bridge`。备份：`config.yaml.bak-20261012-165216`、`state.db.bak-20261012-165216`、`cron/jobs.json.bak-20261012-165216`。
   - **文档同步**：`docs/SETUP-NEW-MACHINE.md` §4（12 处 `providers.commandcode.*` + 5 处 `custom:commandcode` 全量改名，并加「绝不能叫 commandcode」的警告，旧写法会复现本 bug）+ `docs/TROUBLESHOOTING-CONNECTION.md`（新症状行 + 附录 C）+ `docs/WHY-BRIDGE.md` + `platforms/pc/README.md`（待办第 7 项：PC 同名同病）+ 手册镜像副本已重新 `cp`（逐字节一致）。
   - **未解/待查（独立问题）**：抓拍到一次约 60 秒的「全量 503」窗口（16:53:16–16:54:31，所有 chat 在 2~5 毫秒内被拒 `No available CommandCode credentials for model ...`，不走上游），紧跟在一次**客户端中断**之后（日志有 `chat completion aborted: client disconnected`）。代码嫌疑点：`src/provider.ts:170-173` 把「无状态码的失败」记成 `recordFailure(id)` → 60 秒冷却，而客户端中断/网络错误走这条。但**两次定向复现（分别在流开始前后断开客户端）都没有触发**，所以尚未定论、未出补丁；继续查的方向记在 skill `hermes-external-provider-bridge`。
+- 2026-10-29：**上游把 key 判为无效（401）导致全量 503 静默停摆 7.5 小时**，已换 key + 出 `patches/0005` + 改看门狗判据。
+  - **事实**：最后一次成功 chat `01:35:17`；`01:40:23` 起连续 **99 次** 503（`No available CommandCode credentials for model deepseek/deepseek-v4.1-flash`），全程 `/health` 200、`/v1/models` 200、七层自检全绿、bridge 进程健在，直到 `09:07` 用户手动报错。`watchdog.log` 每 5 分钟一条「chat 探测返回 HTTP 503（有响应、非超时），非 wedge，跳过重启」——判据把 503 当成"活着"。
+  - **根因**：绕过 bridge 直打上游（`.env` 里那把 key）`POST /provider/v1/chat/completions` 与 `GET /alpha/whoami` 均 **401 `Invalid 'Authorization' header or token.`**；key 格式正常（`user_` 前缀、93 字符、无空白），是**被吊销/过期**，与余额无关（余额 9.07，周窗口 5.96/35）。`/admin/commandcode/credentials` 当时显示 `billingError: CommandCode upstream returned 401 Unauthorized`、最后一次成功拉计费停在 10-28 16:20。
+  - **为什么没人知道（两个盲点）**：① `src/credential-router.ts::recordFailure` 对 401 写 `disabledUntil = MAX_SAFE_INTEGER`（永久禁用），后续每个请求在 `select()` 处筛空候选、**秒回 503 且不打任何日志**，只有重启进程才恢复；② 看门狗见「有 HTTP 响应」就判非 wedge。
+  - **处置**：上游 Studio 新建 key → 换进 `~/commandcode-bridge/.env` 第 12/17 行（`COMMANDCODE_API_KEY` 与 `COMMANDCODE_API_KEYS` 两处都改；顺手去掉旧模板 `KEY= value` 里 `=` 后那个空格，否则 `source .env` 会报 `command not found`）→ `launchctl kickstart -k`（12 秒起）→ 验证 `whoami` 200、非流式 200（内容正常）、流式 SSE 200、`scripts/doctor.sh` 七层全绿。旧 key 的三个 `.env.bak-*` 已删除。
+  - **`patches/0005-auth-cooldown-and-diagnostics.patch`（新增，需在 0001→0004 之后打）**：① 401 改为有界冷却 `COMMANDCODE_AUTH_COOLDOWN_MS`（默认 300000 = 5 分钟），到期自动再试；② 计费接口（同一把 key）返回 200 即解除任何禁用理由（含 auth）；③ 候选为空时 503 的 message 带每把 key 的具体原因（`default: auth for 268s more; last billing error: ...`），server 侧同时打 `code=commandcode_no_available_credential` 的 warn；④ `/admin/commandcode/credentials` 增加 `disabledReason` 与 `credential_auth_cooldown_ms`。`npx tsc --noEmit` + `npm test` **237 passed**（新增 3 项），`npm run build` 后已重启生效。
+  - **实跑验证补丁（不是只跑单测）**：起一个临时实例（`:19993`，key 换成假值、`COMMANDCODE_AUTH_COOLDOWN_MS=60000`）——第 1 次请求 502 `upstream 401`；第 2/3 次 503 且 message 含 `auth for 60s more`；等 66 秒后再次请求又打到上游（说明冷却到期自动解禁）；日志出现 2 条 `code=commandcode_no_available_credential` 的 warn。临时实例已杀。
+  - **看门狗判据（`platforms/macos/bridge_watchdog.sh`，已重新部署到 `~/.hermes/scripts/`）**：读响应体，命中 `commandcode_no_available_credential` → 单独记账（`cred_streak`）+ 弹 macOS 通知（同一事故 6 小时一次，`cred_notify_at` 落盘）+ **不重启**（重启救不了 key）；恢复 200 时写一条「chat 探测恢复正常」并清零。mock 三路径实跑：凭证 503（连 3 轮记账、通知只弹 1 次）、恢复 200（清零 + 日志）、其他 503（沿用旧话术）。
+  - **文档**：`docs/TROUBLESHOOTING-CONNECTION.md` 新增**附录 D**（症状 / 一键验 key / 两个盲点 / 换 key 四步 / 「别急着重启」）+ 症状速查表加一行；`config/env.example` 增加 `COMMANDCODE_AUTH_COOLDOWN_MS`。
+  - **仍未解**：2026-10-12 记的「客户端中断后约 60 秒全量 503」依旧存在（`provider.ts` 把无状态码失败记成 60s 冷却）。区别是现在 503 会写明 `cooldown for Ns more`，且看门狗会通知，不再静默。

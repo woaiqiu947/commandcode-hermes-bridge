@@ -31,6 +31,14 @@
 # 部署：launchd 定时任务 com.commandcode.bridge-watchdog，StartInterval=300（5 分钟）。
 # 额度成本：每次探测 max_tokens=128 ≈ 180 token，5 分钟一次 ≈ 5 万 token/天，可忽略。
 #
+# ── 2026-10-29 修订：503 不能一律读成「bridge 正常」 ───────────────────────
+# 事故：上游把 `.env` 的 key 判成无效（401），bridge 侧凭证被永久禁用，所有 chat
+# 请求连续 503 达 7.5 小时；而本脚本第 4 段把「有 HTTP 响应」一律当成非 wedge、
+# 静默跳过——日志里每 5 分钟一条「跳过重启」，没人会去看，服务其实一直不可用。
+# 改法：非 200 时读响应体，若 code=commandcode_no_available_credential（凭证不可用：
+# key 失效 / 冷却中 / 无额度），单独记账 + 弹一条 macOS 通知（同一事故 6 小时只弹一次），
+# 仍然不重启——重启救不了凭证问题，只会掐断在飞行中的请求。
+#
 # 注意：只在「判定异常 / 重启 / 计数变化」时写日志，健康且无计数时静默退出。
 
 set -u
@@ -60,16 +68,34 @@ load_now() {
 # 计数落盘：跨轮次累计，避免单次抽风就重启
 chat_strikes=0
 host_strikes=0
+cred_notify_at=0      # 上次「凭证不可用」通知的时间戳（6 小时限流）
+cred_streak=0         # 连续多少轮探测到凭证不可用
 read_state() {
   if [ -f "$STATE_FILE" ]; then
     v=$(grep -E '^chat_strikes=[0-9]+$' "$STATE_FILE" 2>/dev/null | cut -d= -f2)
     [ -n "$v" ] && chat_strikes=$v
     v=$(grep -E '^host_strikes=[0-9]+$' "$STATE_FILE" 2>/dev/null | cut -d= -f2)
     [ -n "$v" ] && host_strikes=$v
+    v=$(grep -E '^cred_notify_at=[0-9]+$' "$STATE_FILE" 2>/dev/null | cut -d= -f2)
+    [ -n "$v" ] && cred_notify_at=$v
+    v=$(grep -E '^cred_streak=[0-9]+$' "$STATE_FILE" 2>/dev/null | cut -d= -f2)
+    [ -n "$v" ] && cred_streak=$v
   fi
 }
 save_state() {
-  printf 'chat_strikes=%s\nhost_strikes=%s\n' "$chat_strikes" "$host_strikes" > "$STATE_FILE"
+  printf 'chat_strikes=%s\nhost_strikes=%s\ncred_notify_at=%s\ncred_streak=%s\n' \
+    "$chat_strikes" "$host_strikes" "$cred_notify_at" "$cred_streak" > "$STATE_FILE"
+}
+
+# 弹 macOS 通知（同一事故 6 小时只弹一次；无 GUI 会话时静默失败）
+notify_once() {
+  now_ts=$(date +%s)
+  if [ "$cred_notify_at" -gt 0 ] && [ $((now_ts - cred_notify_at)) -lt 21600 ]; then
+    return 0
+  fi
+  cred_notify_at=$now_ts
+  save_state
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
 }
 
 # 端口有没有人监听——这是「bridge 进程还在不在」最直接的证据
@@ -138,21 +164,41 @@ save_state
 PROBE_BODY="{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":$PROBE_MAX_TOKENS}"
 
 chat_probe() {
-  curl -s -o /dev/null -w '%{http_code}' -m "$CHAT_TIMEOUT" \
+  # 响应体也要带走：503 里的 code 决定是「凭证不可用」还是别的
+  curl -s -o "$PROBE_BODY_FILE" -w '%{http_code}' -m "$CHAT_TIMEOUT" \
     -X POST "$BRIDGE_URL/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $BRIDGE_KEY" \
+    -H "Authorization: Bearer ${BRIDGE_KEY}" \
     -d "$PROBE_BODY" 2>/dev/null
 }
 
+PROBE_BODY_FILE=$(mktemp -t cc-watchdog-body 2>/dev/null || echo "/tmp/cc-watchdog-body.$$")
 CODE=$(chat_probe)
 if [ "$CODE" = "200" ]; then
-  if [ "$chat_strikes" != "0" ]; then
+  if [ "$chat_strikes" != "0" ] || [ "$cred_streak" != "0" ]; then
     chat_strikes=0
+    cred_streak=0
     save_state
+    log "chat 探测恢复正常（HTTP 200）"
   fi
+  rm -f "$PROBE_BODY_FILE"
   exit 0    # 健康
 fi
+
+# 凭证不可用（key 失效 / 冷却中 / 无额度）：这是「服务整晚不可用但 /health 是绿的」
+# 的典型形态，必须留痕 + 通知；重启动不了 key，所以不重启。
+if [ -f "$PROBE_BODY_FILE" ] && grep -q 'commandcode_no_available_credential' "$PROBE_BODY_FILE"; then
+  cred_streak=$((cred_streak + 1))
+  chat_strikes=0
+  save_state
+  detail=$(tr -d '\n' < "$PROBE_BODY_FILE" | sed -n 's/.*"message":"\([^"]\{0,180\}\).*/\1/p')
+  log "chat 探测返回 HTTP ${CODE}：凭证不可用（连续 ${cred_streak} 轮），需人工换 key 或等冷却。详情: ${detail:-无}"
+  # 第一轮就通知（不要等 3 轮：凭证问题不会自愈），之后 6 小时限流
+  notify_once "CommandCode 凭证不可用" "bridge 连续 ${cred_streak} 轮返回凭证错误，聊天已不可用：${detail:-请查看 watchdog.log}"
+  rm -f "$PROBE_BODY_FILE"
+  exit 0
+fi
+rm -f "$PROBE_BODY_FILE"
 
 # 有 HTTP 响应但非 200：bridge 有响应，非 wedge（额度/冷却/模型），重启无效
 if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then

@@ -1,0 +1,272 @@
+# 0005 — 上游 401 不再永久禁用凭证 / 凭证不可用时说清楚原因（2026-10-29）
+#
+# 适用：yelixir-dev/commandcode-bridge 1.53.0.a，且已按序打过 0001→0002→0003→0004。
+# 打补丁：git apply patches/0005-auth-cooldown-and-diagnostics.patch
+# 打完必须：npm install（若有新增依赖，本补丁没有）→ npm run build → 重启 bridge
+#   macOS: launchctl kickstart -k gui/$(id -u)/com.commandcode.bridge
+#   （build 不会触发 KeepAlive 重启，见 TROUBLESHOOTING 第 ⑥ 层）
+#
+# 背景：2026-10-29 上游把 key 判为无效（401），bridge 把该凭证写成
+# disabledUntil=MAX_SAFE_INTEGER（永久禁用），此后所有 chat 在 select() 处筛空候选、
+# 静默秒回 503，连续 7.5 小时无人发现（看门狗把 503 读成「有响应」）。四处改动：
+#   1. 401 只禁用 COMMANDCODE_AUTH_COOLDOWN_MS（默认 5 分钟），到期自动再试；真正的
+#      死 key 仍会每 5 分钟重试一次，成本可忽略。
+#   2. 计费接口（同一把 key）返回 200 → 立刻解除任何禁用理由（含 auth），上游抽风后自愈。
+#   3. 候选为空时 503 的 message 带上每把 key 的具体原因（auth 剩余秒数 / 余额 / 窗口 / 计费错误），
+#      并在 server 侧打一条 code=commandcode_no_available_credential 的 warn。
+#   4. /admin/commandcode/credentials 增加 disabledReason 与 credential_auth_cooldown_ms。
+#
+# 测试：npx tsc --noEmit && npm test（本次 237 项全绿；新增 3 项覆盖上述行为）
+#
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -284,6 +284,12 @@
+   commandCodeBillingRefreshMs: number;
+   commandCodeBillingTimeoutMs: number;
+   commandCodeCredentialCooldownMs: number;
++  /**
++   * 本地定制（2026-10-29）：上游 401 后凭证禁用多久再重试。
++   * 旧行为是永久禁用（disabledUntil=MAX_SAFE_INTEGER），一次上游 401 就让所有
++   * 请求连续 503 直到重启进程——10-29 实测因此静默停摆 7.5 小时。
++   */
++  commandCodeAuthCooldownMs: number;
+   commandCodeRetryMaxAttempts: number;
+   commandCodeRetryBackoffMs: number;
+   requestBodyLimitBytes: number;
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -222,6 +222,11 @@
+     env.COMMANDCODE_CREDENTIAL_COOLDOWN_MS,
+     routingFromFile.credentialCooldownMs,
+   );
++  // 本地定制（2026-10-29）：上游 401 后凭证禁用多久再试。
++  // 旧行为是永久禁用，一次上游 401 就让所有请求连续 503 到重启进程为止
++  // （10-29 静默停摆 7.5 小时；看门狗把 503 当「有响应」所以没告警）。
++  // 真正的换 key 场景仍然需要人工，但上游抽风/瞬时 401 现在能在 5 分钟内自愈。
++  const commandCodeAuthCooldownMs = parseNumber(env.COMMANDCODE_AUTH_COOLDOWN_MS, 300_000);
+   const maxInFlightPerCredential = parseNumber(
+     env.COMMANDCODE_MAX_IN_FLIGHT_PER_CREDENTIAL,
+     routingFromFile.maxInFlightPerCredential,
+@@ -272,6 +277,7 @@
+     commandCodeBillingRefreshMs,
+     commandCodeBillingTimeoutMs: parseNumber(env.COMMANDCODE_BILLING_TIMEOUT_MS, 10_000),
+     commandCodeCredentialCooldownMs,
++    commandCodeAuthCooldownMs,
+     commandCodeRetryMaxAttempts: parseNumber(env.COMMANDCODE_RETRY_MAX_ATTEMPTS, 5),
+     commandCodeRetryBackoffMs: parseNumber(env.COMMANDCODE_RETRY_BACKOFF_MS, 250),
+     requestBodyLimitBytes: parseNumber(env.REQUEST_BODY_LIMIT_BYTES, 1_048_576),
+--- a/src/credential-router.ts
++++ b/src/credential-router.ts
+@@ -8,6 +8,8 @@
+ const DAY_MS = 86_400_000;
+ const MIN_DAYS_LEFT = 0.25;
+ const DEFAULT_BILLING_TIMEOUT_MS = 10_000;
++// 本地定制（2026-10-29）：401 只禁用 5 分钟再试，而不是永久禁用。
++const DEFAULT_AUTH_COOLDOWN_MS = 300_000;
+ 
+ export interface CommandCodeCredentialState {
+   credential: CommandCodeCredential;
+@@ -41,6 +43,8 @@
+   disabledUntil: number | null;
+   disabledUntilIso: string | null;
+   disabledForMs: number;
++  /** 为什么被禁用：auth（上游 401）/ billing / cooldown / expired。 */
++  disabledReason: CommandCodeCredentialState["disabledReason"];
+   inFlight: number;
+   lastSelectedAt: number | null;
+   lastSelectedAtIso: string | null;
+@@ -75,6 +79,8 @@
+   billingRefreshMs: number;
+   billingTimeoutMs?: number;
+   cooldownMs: number;
++  /** 上游 401 后凭证禁用时长（毫秒）。默认 5 分钟，过期后自动再试。 */
++  authCooldownMs?: number;
+   now?: () => number;
+   billingProvider?: (
+     credential: CommandCodeCredential,
+@@ -213,6 +219,34 @@
+ 
+ function errorMessage(error: unknown): string {
+   return error instanceof Error ? error.message : String(error);
++}
++
++/**
++ * 本地定制（2026-10-29）：候选为空时把「每把 key 为什么不可用」写进 503 的 message。
++ * 旧版只回一句 "No available CommandCode credentials for model X"，且不打日志 ——
++ * 上游 key 作废时整晚静默，只能靠人去翻计费诊断才看得出是 401。
++ */
++function describeUnavailableCredentials(
++  states: CommandCodeCredentialState[],
++  model: string,
++  now: number,
++): string {
++  const parts = states.map((state) => {
++    const reasons: string[] = [];
++    if (state.credential.enabled === false) reasons.push("disabled in config");
++    if (!isModelAllowed(state.credential, model))
++      reasons.push(`model ${model} not in allowedModels`);
++    if (state.disabledUntil > now) {
++      const left = Math.ceil((state.disabledUntil - now) / 1000);
++      reasons.push(`${state.disabledReason ?? "disabled"} for ${left}s more`);
++    }
++    if (state.inFlight > 0) reasons.push(`${state.inFlight} request(s) in flight`);
++    if (hasExceededWindow(state)) reasons.push("usage window exceeded");
++    if (!hasKnownCreditCapacity(state, now)) reasons.push("no remaining credits");
++    if (state.billingError) reasons.push(`last billing error: ${state.billingError}`);
++    return `${state.credential.id}: ${reasons.length > 0 ? reasons.join("; ") : "unavailable"}`;
++  });
++  return parts.join(" | ");
+ }
+ 
+ export class CommandCodeCredentialRouter {
+@@ -224,6 +258,7 @@
+   private readonly billingRefreshMs: number;
+   private readonly billingTimeoutMs: number;
+   private readonly cooldownMs: number;
++  private readonly authCooldownMs: number;
+   private readonly now: () => number;
+   private readonly billingProvider:
+     | ((
+@@ -244,6 +279,7 @@
+     this.billingRefreshMs = options.billingRefreshMs;
+     this.billingTimeoutMs = positive(options.billingTimeoutMs, DEFAULT_BILLING_TIMEOUT_MS);
+     this.cooldownMs = options.cooldownMs;
++    this.authCooldownMs = positive(options.authCooldownMs, DEFAULT_AUTH_COOLDOWN_MS);
+     this.now = options.now ?? Date.now;
+     this.billingProvider = options.billingProvider;
+     this.validateBillingBeforeSelect = options.validateBillingBeforeSelect ?? false;
+@@ -346,6 +382,7 @@
+             : disabledUntil === Number.MAX_SAFE_INTEGER
+               ? Number.MAX_SAFE_INTEGER
+               : Math.max(0, disabledUntil - now),
++        disabledReason: state.disabledReason,
+         inFlight: state.inFlight,
+         lastSelectedAt: state.lastSelectedAt > 0 ? state.lastSelectedAt : null,
+         lastSelectedAtIso:
+@@ -393,7 +430,11 @@
+     let candidates = this.basicCandidates(options.model, now, excludedIds, options.ignoreCooldown);
+     if (candidates.length === 0) {
+       throw new NoAvailableCommandCodeCredentialError(
+-        `No available CommandCode credentials for model ${options.model}`,
++        `No available CommandCode credentials for model ${options.model} (${describeUnavailableCredentials(
++          this.states.filter((state) => !excludedIds.has(state.credential.id)),
++          options.model,
++          now,
++        )})`,
+       );
+     }
+ 
+@@ -412,7 +453,11 @@
+ 
+     if (candidates.length === 0) {
+       throw new NoAvailableCommandCodeCredentialError(
+-        `No available CommandCode credentials for model ${options.model}`,
++        `No available CommandCode credentials for model ${options.model} (${describeUnavailableCredentials(
++          this.states.filter((state) => !excludedIds.has(state.credential.id)),
++          options.model,
++          now,
++        )})`,
+       );
+     }
+ 
+@@ -445,7 +490,11 @@
+ 
+     const statusCode = options.statusCode;
+     if (statusCode === 401) {
+-      state.disabledUntil = Number.MAX_SAFE_INTEGER;
++      // 本地定制（2026-10-29）：上游 401 只禁用 authCooldownMs（默认 5 分钟）。
++      // 旧版写 Number.MAX_SAFE_INTEGER = 永久禁用，一次上游 401 就让全部请求
++      // 在 select() 处筛空候选、连续 503 到进程重启为止（10-29 静默停摆 7.5 小时）。
++      // 真正的 key 作废仍需人工换 key，但瞬时 401 不该把服务钉死。
++      state.disabledUntil = this.now() + this.authCooldownMs;
+       state.disabledReason = "auth";
+     } else if (statusCode === 402) {
+       state.disabledUntil = this.now() + Math.max(this.cooldownMs, this.billingRefreshMs);
+@@ -495,7 +544,10 @@
+       if (expired) {
+         state.disabledUntil = Number.MAX_SAFE_INTEGER;
+         state.disabledReason = "expired";
+-      } else if (remaining > 0 && state.disabledReason !== "auth") {
++      } else if (remaining > 0) {
++        // 本地定制（2026-10-29）：计费接口用的是同一把 key，它返回 200 就证明凭证
++        // 有效，因此任何禁用理由（含 auth）都该解除。旧版对 "auth" 例外，导致上游
++        // 401 之后即使凭证恢复正常，也得等进程重启才解禁。
+         state.disabledUntil = 0;
+         state.disabledReason = undefined;
+       } else if (state.disabledUntil !== Number.MAX_SAFE_INTEGER) {
+--- a/src/commandcode.ts
++++ b/src/commandcode.ts
+@@ -335,6 +335,7 @@
+     billingRefreshMs: config.commandCodeBillingRefreshMs,
+     billingTimeoutMs: config.commandCodeBillingTimeoutMs,
+     cooldownMs: config.commandCodeCredentialCooldownMs,
++    authCooldownMs: config.commandCodeAuthCooldownMs,
+     billingProvider: (credential: CommandCodeCredential, signal: AbortSignal) =>
+       billingClient.getSnapshot(credential, signal),
+     validateBillingBeforeSelect: true,
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -614,6 +614,7 @@
+       billing_refresh_ms: config.commandCodeBillingRefreshMs,
+       billing_timeout_ms: config.commandCodeBillingTimeoutMs,
+       credential_cooldown_ms: config.commandCodeCredentialCooldownMs,
++      credential_auth_cooldown_ms: config.commandCodeAuthCooldownMs,
+       credential_count: credentials.length,
+       alerting: {
+         enabled: config.balanceAlerts.enabled,
+@@ -752,6 +753,15 @@
+           .send(openAIError(error.message, "configuration_error", "missing_upstream_api_key"));
+       }
+       if (error instanceof NoAvailableCommandCodeCredentialError) {
++        // 本地定制（2026-10-29）：旧版这条 503 完全不打日志，凭证失效时整晚静默，
++        // 看门狗又把 503 读成「bridge 有响应」→ 没人知道服务早就不能用了。
++        request.log.warn(
++          {
++            code: "commandcode_no_available_credential",
++            model: resolvedModel?.publicModel ?? null,
++          },
++          error.message,
++        );
+         return reply
+           .code(503)
+           .send(
+--- a/tests/balance-alerts.test.ts
++++ b/tests/balance-alerts.test.ts
+@@ -33,6 +33,7 @@
+     disabledUntil: null,
+     disabledUntilIso: null,
+     disabledForMs: 0,
++    disabledReason: undefined,
+     inFlight: 0,
+     lastSelectedAt: null,
+     lastSelectedAtIso: null,
+--- a/tests/server.test.ts
++++ b/tests/server.test.ts
+@@ -39,6 +39,7 @@
+         disabledUntil: null,
+         disabledUntilIso: null,
+         disabledForMs: 0,
++        disabledReason: undefined,
+         inFlight: 0,
+         lastSelectedAt: null,
+         lastSelectedAtIso: null,
+--- a/tests/commandcode.test.ts
++++ b/tests/commandcode.test.ts
+@@ -40,6 +40,7 @@
+   commandCodeBillingRefreshMs: 60_000,
+   commandCodeBillingTimeoutMs: 10_000,
+   commandCodeCredentialCooldownMs: 60_000,
++  commandCodeAuthCooldownMs: 300_000,
+   commandCodeRetryMaxAttempts: 5,
+   commandCodeRetryBackoffMs: 1,
+   requestBodyLimitBytes: 1_048_576,
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -37,6 +37,7 @@
+     commandCodeBillingRefreshMs: 60_000,
+     commandCodeBillingTimeoutMs: 10_000,
+     commandCodeCredentialCooldownMs: 60_000,
++    commandCodeAuthCooldownMs: 300_000,
+     commandCodeRetryMaxAttempts: 5,
+     commandCodeRetryBackoffMs: 1,
+     requestBodyLimitBytes: 1_048_576,
